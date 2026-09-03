@@ -1,0 +1,36 @@
+name: refresh-token
+
+# بيتنده من البوت لما التوكن يخلص (workflow_dispatch)
+# وكمان كل 12 دقيقة عشان يفضل جاهز (توكن مصر الرقمية 15 دقيقة)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/12 * * * *'
+
+concurrency:
+  group: refresh-token
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: تثبيت Playwright
+        run: |
+          pip install --quiet playwright
+          playwright install --with-deps chromium
+
+      - name: تجديد التوكن
+        env:
+          DE_PHONE: ${{ secrets.DE_PHONE }}
+          DE_PASSWORD: ${{ secrets.DE_PASSWORD }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+        run: python refresh_token.py
