@@ -22,6 +22,22 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: فحص الوصول لمصر الرقمية
+        run: |
+          echo "--- DNS ---"
+          getent hosts digital.gov.eg || echo "DNS فشل"
+          getent hosts apis.digital.gov.eg || echo "DNS API فشل"
+          echo "--- HTTP (المتصفح) ---"
+          curl -sS -o /dev/null -w "digital.gov.eg -> %{http_code} in %{time_total}s\n" \
+            --max-time 30 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0" \
+            https://digital.gov.eg/ || echo "فشل الاتصال بالبوابة"
+          echo "--- HTTP (الـAPI) ---"
+          curl -sS -o /dev/null -w "apis.digital.gov.eg -> %{http_code} in %{time_total}s\n" \
+            --max-time 30 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0" \
+            https://apis.digital.gov.eg/ || echo "فشل الاتصال بالـAPI"
+          echo "--- بلد الرَنَر ---"
+          curl -sS --max-time 15 https://ipinfo.io/json || true
+
       - name: تثبيت Playwright
         run: |
           pip install --quiet playwright
