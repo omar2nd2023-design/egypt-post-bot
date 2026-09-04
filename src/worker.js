@@ -517,7 +517,7 @@ function handoffReady(env) {
  */
 async function handoff(env, chatId, msgId, bc) {
   try {
-    await fetch(env.WORKER_URL.replace(/\/+$/, '') + '/resume', {
+    await fetch(env.WORKER_URL.replace(/\/+$/, '') + '/finish', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${env.ADMIN_SECRET}`,
@@ -552,7 +552,7 @@ export default {
     // الاستدعاء الأول ما لحقش في ميزانيته، فسلّم المهمة هنا.
     // ميزانية جديدة كاملة. **مافيش تسليم تاني من هنا** — النتيجة
     // بتتكتب في نفس الرسالة أيًا كانت، فمفيش سلسلة لا نهائية.
-    if (url.pathname === '/resume' && request.method === 'POST') {
+    if (url.pathname === '/finish' && request.method === 'POST') {
       const auth = request.headers.get('Authorization') || '';
       if (auth !== `Bearer ${env.ADMIN_SECRET}`) {
         return new Response('unauthorized', { status: 401 });
