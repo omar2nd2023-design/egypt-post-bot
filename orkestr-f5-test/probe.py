@@ -1122,6 +1122,11 @@ def _renew_summary(res):
     for k in ("api_status", "pushed_to_worker", "joined", "reused_recent"):
         if res.get(k) is not None:
             out[k] = res[k]
+    # تشخيصي بس: سبب فشل الاتصال بالـWorker — كود HTTP ("worker http
+    # 401") أو نوع الاستثناء ("URLError: ... name resolution"). مصدره
+    # معقّم أصلاً في _push_to_worker، وبنعقّمه تاني هنا كحزام أمان.
+    if res.get("worker_detail") is not None:
+        out["worker_detail"] = redact(res["worker_detail"], 150)
     return out
 
 
