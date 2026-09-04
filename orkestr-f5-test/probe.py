@@ -845,7 +845,13 @@ def _push_to_worker(tok):
             data=json.dumps({"token": tok}).encode(),
             method="POST",
             headers={"Authorization": f"Bearer {ADMIN_SECRET}",
-                     "Content-Type": "application/json"})
+                     "Content-Type": "application/json",
+                     # من غير ده urllib بيبعت "Python-urllib/3.x"،
+                     # وCloudflare بيحجبه على الحافة بخطأ 1010 قبل ما
+                     # الـWorker يشتغل أصلاً — وده كان سبب
+                     # worker_push_failed. ده اسم خدمتنا الحقيقي،
+                     # مش انتحال متصفح.
+                     "User-Agent": "egypt-post-renewer/1.0"})
         with urllib.request.urlopen(req, timeout=30) as r:
             return (200 <= r.status < 300), f"worker http {r.status}"
     except Exception as e:
