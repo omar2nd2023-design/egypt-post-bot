@@ -15,8 +15,9 @@ let code = readFileSync(SRC, 'utf8');
 code = code.replace(/^export default \{[\s\S]*$/m, '');
 code += `
 export { tokenValid, tokenExpIn, getToken, renewNow, acquireLock,
-         releaseLock, triggerRenew, waitForToken,
-         TOKEN_KEY, LOCK_KEY, USABLE_MARGIN, RENEW_MARGIN };
+         releaseLock, triggerRenew, waitForToken, fetchJourney,
+         TOKEN_KEY, LOCK_KEY, USABLE_MARGIN, RENEW_MARGIN,
+         TRACK_BUDGET_MS };
 `;
 const mod = await import(
   'data:text/javascript;base64,' + Buffer.from(code, 'utf8').toString('base64'));
@@ -224,5 +225,76 @@ console.log('\n--- إضافي: tokenExpIn مابيكشفش أي جزء من ال
   check('مش نص', typeof n, 'number');
 }
 
+console.log('\n--- Case 11: الحد الزمني مايأثرش على المسار السريع ---');
+{
+  const env = { RENEWER_URL: 'https://gw.test', RENEW_SECRET: 's3cr3t' };
+  const payload = { records: [{ a: 1 }, { a: 2 }], status: 'تم تسليم الشحنة' };
+  let sawSignal = false;
+  globalThis.fetch = async (u, init) => {
+    sawSignal = !!init.signal;                 // الميزانية اتبعتت فعلاً
+    return { ok: true, status: 200, json: async () => payload };
+  };
+  const t0 = Date.now();
+  const r = await mod.fetchJourney('EKPB0412385EG', null, env,
+                                   mod.TRACK_BUDGET_MS);
+  check('العقد زي ما هو {records,status}', r, payload);
+  check('مافيش err', 'err' in r, false);
+  check('رجّع فورًا', Date.now() - t0 < 500, true);
+  check('الـsignal اتبعت للـfetch', sawSignal, true);
+}
+
+console.log('\n--- Case 12: البطء بيرجّع timeout (مش خطأ تاني) ---');
+{
+  const env = { RENEWER_URL: 'https://gw.test', RENEW_SECRET: 's3cr3t' };
+  // fetch بيحترم الـsignal زي الحقيقي
+  globalThis.fetch = (u, init) => new Promise((res, rej) => {
+    const t = setTimeout(
+      () => res({ ok: true, status: 200, json: async () => ({}) }), 5000);
+    init.signal.addEventListener('abort', () => {
+      clearTimeout(t);
+      const e = new Error('The operation was aborted due to timeout');
+      e.name = 'TimeoutError';
+      rej(e);
+    });
+  });
+  const t0 = Date.now();
+  const r = await mod.fetchJourney('X', null, env, 300);
+  const ms = Date.now() - t0;
+  check('رجّع err=timeout', r, { err: 'timeout' });
+  check('وقف عند الميزانية مش عند الـ5 ثواني', ms < 2000, true);
+}
+
+console.log('\n--- Case 13: خطأ عادي مابيتلبسش لبس timeout ---');
+{
+  const env = { RENEWER_URL: 'https://gw.test', RENEW_SECRET: 's3cr3t' };
+  globalThis.fetch = async () => { throw new TypeError('network down'); };
+  const r = await mod.fetchJourney('X', null, env, 5000);
+  check('مش timeout', r.err === 'timeout', false);
+  check('فيه err واضح', typeof r.err === 'string' && r.err.length > 0, true);
+}
+
+console.log('\n--- Case 14: gateway 4xx بيفضل زي ما هو ---');
+{
+  const env = { RENEWER_URL: 'https://gw.test', RENEW_SECRET: 's3cr3t' };
+  globalThis.fetch = async () => ({ ok: false, status: 401 });
+  const r = await mod.fetchJourney('X', null, env, 5000);
+  check('gateway http 401', r, { err: 'gateway http 401' });
+}
+
+console.log('\n--- Case 15: البوابة نايمة (503) → إعادة واحدة ---');
+{
+  const env = { RENEWER_URL: 'https://gw.test', RENEW_SECRET: 's3cr3t' };
+  let n = 0;
+  globalThis.fetch = async () => {
+    n++;
+    return n === 1
+      ? { ok: false, status: 503 }
+      : { ok: true, status: 200,
+          json: async () => ({ records: [{ a: 1 }], status: 'ok' }) };
+  };
+  const r = await mod.fetchJourney('X', null, env, 20000);
+  check('نجح بعد الاستيقاظ', r.records.length, 1);
+  check('نداءين بالظبط — مفيش تالت', n, 2);
+}
 console.log(FAILED === 0 ? '\nALL PASS' : `\n${FAILED} FAILED`);
 process.exit(FAILED === 0 ? 0 : 1);
