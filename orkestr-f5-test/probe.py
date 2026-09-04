@@ -6,10 +6,15 @@
 
 مفيش هنا — ولا هيتضاف:
   · username / password / أي credentials
-  · تسجيل دخول أو ملء أي حقل
-  · دوس على زرار تسجيل الدخول
-  · التقاط JWT أو أي توكن
+  · ملء أي حقل أو الضغط على submit
+  · التقاط JWT أو access/refresh token أو هيدر Authorization
   · أي تعديل على بصمة المتصفح أو محاولة تجاوز F5
+
+بندوس على «تسجيل الدخول» في البوابة عشان **نفتح** الفورم وبس. ده المسار
+الأساسي: auto_token المحلي الشغّال مابيبنيش authorization URL — بيسيب
+البوابة تولّد الطلب بالـredirect_uri المسجّل عندها. فبدل ما نخمّن القيمة
+دي (وKeycloak رفض تخميننا بـ"Invalid parameter: redirect_uri")، بنقرا
+الـURL اللي البوابة ولّدته وبنقفل الـpopup. مفيش كتابة ولا إرسال.
 
 بنستخدم Chromium headless بأعلام الحاويات القياسية بس
 (--no-sandbox / --disable-dev-shm-usage / --disable-gpu) — دي مطلوبة
@@ -73,6 +78,24 @@ PORTAL_TIMEOUT = 60_000       # مللي — تحميل الصفحة
 F5_SETTLE_MS = 8_000          # نستنى F5 ينفّذ تحدّيه ويستقر
 KC_TIMEOUT = 60_000
 KC_SETTLE_MS = 6_000
+
+# المسار الأساسي — البوابة هي اللي تبدأ الـflow (زي auto_token بالظبط)
+POPUP_TIMEOUT = 30_000
+POPUP_SETTLE_MS = 6_000
+# نفس الـselectors المستعملة في auto_token.py الشغّال محليًا
+LOGIN_ENTRY_SELECTORS = (
+    "text=تسجيل الدخول",
+    "a:has-text('تسجيل الدخول')",
+    "button:has-text('تسجيل الدخول')",
+)
+# بارامترات بنيوية — دي اللي بنقارن بيها، فبتتعرض بقيمتها
+AUTHORIZE_PARAM_KEYS = (
+    "client_id", "response_type", "scope", "redirect_uri",
+    "response_mode", "code_challenge_method", "ui_locales",
+    "kc_idp_hint", "prompt", "display", "login_hint",
+)
+# قيم عشوائية مالهاش معنى تشخيصي — بنسجّل وجودها وطولها بس، مش قيمتها
+OPAQUE_PARAM_KEYS = ("state", "nonce", "code_challenge", "session_state")
 
 # صفحة حجب/تحدي من F5 صغيرة جدًا. الصفحة الحقيقية مئات الكيلوبايت.
 SMALL_PAGE_BYTES = 30_000
@@ -250,6 +273,57 @@ def _oidc_error_from_url(url):
     return out or None
 
 
+def _authorize_params(url):
+    """بارامترات طلب الـauth من الـURL اللي البوابة ولّدته.
+
+    القيم البنيوية (client_id/scope/redirect_uri…) بتتعرض بقيمتها لأنها
+    هي محل المقارنة. القيم العشوائية (state/nonce/PKCE) بيتسجّل وجودها
+    وطولها بس — مالهاش معنى تشخيصي وماينفعش تتطبع.
+    """
+    out, opaque, extra = {}, {}, []
+    try:
+        from urllib.parse import urlparse, parse_qs
+        q = parse_qs(urlparse(url or "").query, keep_blank_values=True)
+        for k, v in q.items():
+            val = v[0] if v else ""
+            if k in AUTHORIZE_PARAM_KEYS:
+                out[k] = redact(val, 300)
+            elif k in OPAQUE_PARAM_KEYS:
+                opaque[k] = {"present": bool(val), "len": len(val)}
+            else:
+                extra.append(k)
+    except Exception:
+        return None
+    if not (out or opaque or extra):
+        return None
+    r = {"params": out}
+    if opaque:
+        r["opaque"] = opaque
+    if extra:
+        r["other_param_names"] = sorted(extra)
+    return r
+
+
+def _login_entry(page):
+    """أول زرار «تسجيل الدخول» في البوابة — نفس selectors auto_token.
+
+    بنجرّب الظاهر الأول، وبعدين أي واحد موجود (auto_token بيدوس
+    بـforce من غير ما يتحقق من الظهور).
+    """
+    for require_visible in (True, False):
+        for sel in LOGIN_ENTRY_SELECTORS:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() == 0:
+                    continue
+                if require_visible and not loc.is_visible():
+                    continue
+                return loc, sel
+            except Exception:
+                continue
+    return None, None
+
+
 def _page_error_text(page):
     """نص الخطأ من الصفحة. بنجرّب selectors الثيم الافتراضي، وبعدين
     ثيمات مخصّصة، وأخيرًا أول نص ظاهر في الـbody — لأن ثيم «مصر الرقمية»
@@ -357,15 +431,26 @@ def run_probe():
         )
         page = ctx.new_page()
 
-        # مراقبة طلبات F5 على الشبكة — دليل مباشر بدل التخمين النصّي
-        def _on_response(r):
-            try:
-                if "/TSPD/" in r.url:
-                    tspd_seen.append({"url": safe_url(r.url, 120),
-                                      "status": r.status})
-            except Exception:
-                pass
-        page.on("response", _on_response)
+        # مراقبة طلبات F5 على الشبكة — دليل مباشر بدل التخمين النصّي.
+        # بنسجّل كمان حالة أول تنقّل لكل صفحة، عشان الـpopup ماعندهاش
+        # response object نقرا منه الحالة.
+        nav_status = {}
+
+        def _watch(p, tag):
+            def _on_response(r):
+                try:
+                    if "/TSPD/" in r.url:
+                        tspd_seen.append({"url": safe_url(r.url, 120),
+                                          "status": r.status})
+                    if tag not in nav_status and r.request.is_navigation_request():
+                        nav_status[tag] = r.status
+                except Exception:
+                    pass
+            p.on("response", _on_response)
+
+        _watch(page, "main")
+        # أي popup بتتراقب من لحظة إنشائها — قبل ما تنقّلها يخلص
+        ctx.on("page", lambda p: _watch(p, "popup"))
 
         # ---------- 2) البوابة — نسيب F5 ينفّذ تحدّيه ----------
         t1 = time.monotonic()
@@ -464,46 +549,128 @@ def run_probe():
             res["diagnosis"] = res["failure"]
             return res
 
+        # ---------- 4) المسار الأساسي: البوابة هي اللي تبدأ الـflow ----------
+        # auto_token المحلي مابيبنيش authorization URL — بيدوس «تسجيل
+        # الدخول» وبيسيب البوابة تولّد الطلب بالـredirect_uri المسجّل
+        # عندها. بنكرّر نفس الحاجة: **فتح** الفورم بس، وقراية الـURL،
+        # وقفل الـpopup. مفيش كتابة ولا submit ولا التقاط توكن.
+        pi = {"popup_opened": False}
+        t3 = time.monotonic()
+        tspd_before_pi = len(tspd_seen)
+        try:
+            page.goto(PORTAL_URL, wait_until="domcontentloaded",
+                      timeout=PORTAL_TIMEOUT)
+            page.wait_for_timeout(F5_SETTLE_MS)
+            entry, sel = _login_entry(page)
+            pi["login_entry_selector"] = sel
+            if entry is None:
+                pi["error"] = "زرار «تسجيل الدخول» مالقيناهوش في البوابة"
+            else:
+                # نفضّي حالة التنقّل عشان نمسك تنقّل الدخول هو اللي يتسجّل
+                nav_status.pop("main", None)
+                target = page       # لو مافيش popup، البوابة بتنقّل نفسها
+                try:
+                    with page.expect_popup(timeout=POPUP_TIMEOUT) as pinfo:
+                        entry.click(timeout=15_000)
+                    target = pinfo.value
+                    pi["popup_opened"] = True
+                except Exception:
+                    page.wait_for_timeout(POPUP_SETTLE_MS)
+                target.wait_for_timeout(POPUP_SETTLE_MS)
+
+                html = target.content()
+                title = target.title()
+                status = nav_status.get("popup") or nav_status.get("main")
+                fields = _form_fields(target)
+                ev = classify_page(status, target.url, html, title,
+                                   tspd_seen[tspd_before_pi:])
+                pi.update({
+                    "popup_url": safe_url(target.url),
+                    "final_url": safe_url(target.url),
+                    "status": status,
+                    "title": redact(title, 150),
+                    "authorize_params": _authorize_params(target.url),
+                    "login_form_present": bool(fields.get("username")),
+                    "form_fields": fields,
+                    "is_keycloak_page": _is_keycloak(html, target.url),
+                    "oidc_error_in_url": _oidc_error_from_url(target.url),
+                    "page_error_text": _page_error_text(target),
+                    "page_class": ev["page_class"],
+                    "evidence": ev,
+                })
+                if target is not page:
+                    try:
+                        target.close()
+                    except Exception:
+                        pass
+        except Exception as e:
+            pi["error"] = f"{type(e).__name__}: {e}"[:250]
+        pi["ms"] = round((time.monotonic() - t3) * 1000)
+        res["portal_initiated"] = pi
+
         res["memory_mb"]["peak_observed"] = container_mem()
         res["memory_mb"]["pressure_pct"] = mem_pressure()
 
-        # ---------- 4) الحكم ----------
-        kc = res["keycloak"]
+        # ---------- 5) الحكم — المسار الأساسي هو portal_initiated ----------
+        kc = res["keycloak"]              # ← control سالب للمقارنة بس
         kclass = kc["evidence"]["page_class"]
+        piclass = pi.get("page_class")
 
-        if kc.get("login_form_present"):
+        if pi.get("login_form_present"):
             res["verdict"] = "PASS"
             res["diagnosis"] = "login_form_reached"
             res["conclusion"] = (
-                "Chromium اشتغل، وF5 سمح، ووصلنا فورم دخول Keycloak الحقيقي.")
-        elif kclass in ("f5_block", "f5_challenge"):
+                "Chromium اشتغل، وF5 سمح، والبوابة فتحت فورم دخول Keycloak "
+                "الحقيقي بالـredirect_uri المسجّل عندها.")
+        elif piclass in ("f5_block", "f5_challenge"):
             res["verdict"] = "FAIL"
             res["failure"] = "f5_blocked"
-            res["diagnosis"] = kclass
+            res["diagnosis"] = piclass
             res["conclusion"] = (
-                "F5 وقف عند Keycloak — الأدلة في keycloak.evidence.")
-        elif kc.get("is_keycloak_page"):
-            # وصلنا Keycloak فعلاً — يعني F5 عدّى على الهوب الاتنين.
-            # الفورم مظهرش لأن Keycloak رفض طلب الـauth نفسه (400).
+                "F5 وقف الـpopup — الأدلة في portal_initiated.evidence.")
+        elif pi.get("login_entry_selector") is None:
+            res["verdict"] = "FAIL"
+            res["failure"] = "login_entry_not_found"
+            res["diagnosis"] = "login_entry_not_found"
+            res["conclusion"] = (
+                "البوابة اتحمّلت بس زرار «تسجيل الدخول» مالقيناهوش — يا إما "
+                "الصفحة اتغيّرت يا إما لسه بتحمّل.")
+        elif pi.get("is_keycloak_page"):
             res["verdict"] = "FAIL"
             res["failure"] = "oidc_invalid_request"
             res["diagnosis"] = "keycloak_reachable_oidc_invalid"
             res["conclusion"] = (
-                "🟡 F5 عدّى على الهوب الاتنين ووصلنا Keycloak الحقيقي، بس "
-                "الفورم مظهرش: Keycloak رفض طلب الـauth نفسه — راجع "
-                "keycloak.page_error_text و oidc_error_in_url و "
-                "auth_params_sent (الأرجح redirect_uri غير مسجّل للعميل، "
-                "أو scope ناقص).")
+                "وصلنا Keycloak بالبارامترات اللي البوابة نفسها ولّدتها "
+                "وبرضه مافيش فورم — راجع portal_initiated.authorize_params "
+                "و page_error_text.")
+        elif not pi.get("popup_opened"):
+            res["verdict"] = "FAIL"
+            res["failure"] = "popup_not_opened"
+            res["diagnosis"] = "popup_not_opened"
+            res["conclusion"] = (
+                "دوسنا على الزرار بس مافتحش popup ولا اتنقّلنا لـKeycloak.")
         else:
             res["verdict"] = "FAIL"
             res["failure"] = "keycloak_not_reached"
             res["diagnosis"] = "keycloak_not_reached"
             res["conclusion"] = "الصفحة مش بتاعة Keycloak — لسه ما وصلناش."
 
-        # ملخّص المسار: هل F5 عدّى؟ سؤال مستقل عن نجاح OIDC.
+        # الـcontrol السالب: طلب auth مبني يدوي بـredirect_uri مخمّن.
+        # موجود للمقارنة بس — مش بيدخل في الحكم.
+        res["control_direct_auth"] = {
+            "note": ("طلب auth مبني يدوي بـredirect_uri مخمّن — control "
+                     "سالب، مش المسار الأساسي."),
+            "status": kc.get("status"),
+            "login_form_present": kc.get("login_form_present"),
+            "is_keycloak_page": kc.get("is_keycloak_page"),
+            "page_class": kclass,
+        }
+
+        # هل F5 عدّى؟ سؤال مستقل تمامًا عن صحة طلب الـOIDC.
         res["f5_passed"] = (
             res["portal"]["evidence"]["page_class"] == "normal"
             and kclass not in ("f5_block", "f5_challenge")
+            and piclass not in ("f5_block", "f5_challenge")
         )
         return res
 
@@ -561,6 +728,7 @@ class Handler(BaseHTTPRequestHandler):
                         "diagnosis_values": [
                             "login_form_reached",
                             "keycloak_reachable_oidc_invalid",
+                            "login_entry_not_found", "popup_not_opened",
                             "f5_challenge", "f5_block",
                             "keycloak_not_reached", "portal_failure",
                             "memory_failure", "chromium_launch_failure",
