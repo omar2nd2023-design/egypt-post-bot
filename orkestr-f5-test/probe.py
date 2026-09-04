@@ -43,8 +43,10 @@ HTTP مدمج جوّه الـbundle. الكلمات كانت **نصوص واجه
 import json
 import os
 import re
+import threading
 import time
 import traceback
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("PORT", "8000"))
@@ -694,6 +696,435 @@ def run_probe():
             pass
 
 
+# ============================================================== التجديد
+# الجزء الوحيد اللي بيستعمل بيانات دخول. البيانات بتيجي من متغيّرات
+# البيئة (أسرار Orkestr) — مش من الكود ولا من git — ومابتظهرش في أي
+# لوج ولا في أي رد HTTP. التوكن نفسه كذلك: بيتبعت للـWorker بس،
+# والردود بترجّع metadata مجرّدة.
+#
+# ليه هنا وليه بمتصفح؟ التحقيق أثبت إن الـscope مافيهوش offline_access
+# (يعني مفيش refresh token طويل المدى)، وإن F5 بيرفض أي طلب HTTP مش من
+# متصفح حقيقي على login.di.gov.eg. فالتجديد الوحيد اللي بيعدّي هو دخول
+# طبيعي بمتصفح — وده بالظبط اللي auto_token المحلي بيعمله.
+
+DE_PHONE = os.environ.get("DE_PHONE", "").strip()
+DE_PASSWORD = os.environ.get("DE_PASSWORD", "").strip()
+WORKER_URL = os.environ.get("WORKER_URL", "").strip().rstrip("/")
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "").strip()
+RENEW_SECRET = os.environ.get("RENEW_SECRET", "").strip()
+TEST_BARCODE = os.environ.get("TEST_BARCODE", "EKPB0412385EG").strip()
+
+DE_API = "https://apis.digital.gov.eg/actions"
+LOGIN_TIMEOUT_MS = 20_000
+TOKEN_WAIT_SEC = 45
+# لو جدّدنا من شوية والتوكن لسه كويس، مانعملش دخول تاني — منع login storm
+RENEW_MIN_GAP_SEC = 120
+RENEW_JOIN_TIMEOUT_SEC = 210
+# سقف كلي للدورة الواحدة — أقل من مهلة الانضمام، عشان المنتظرين
+# مايخرجوش بـtimeout والتجديد لسه شغّال
+RENEW_DEADLINE_SEC = 180
+
+PHONE_SELECTORS = ("#username", "input[name='username']",
+                   "input[type='tel']", "input[type='text']")
+NEXT_SELECTORS = ("#kc-login", "input[value='التالى']",
+                  "input[type='submit']", "button[type='submit']")
+SUBMIT_SELECTORS = ("#kc-login", "input[value='تسجيل الدخول']",
+                    "input[type='submit']", "button[type='submit']")
+# كوكي احتياطي لو ماقدرناش نلتقط التوكن من الشبكة
+COOKIE_NAMES = ("KEYCLOAK_IDENTITY", "KEYCLOAK_IDENTITY_LEGACY")
+
+
+def _jwt_payload(tok):
+    try:
+        import base64
+        p = tok.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        return json.loads(base64.urlsafe_b64decode(p.encode()))
+    except Exception:
+        return {}
+
+
+def _is_access_token(tok):
+    """توكن وصول صالح: يبدأ بـeyJ، عنده exp، ومش Serialized-ID."""
+    if not tok or not str(tok).startswith("eyJ") or len(tok) < 100:
+        return False
+    d = _jwt_payload(tok)
+    return bool(d.get("exp")) and str(d.get("typ", "")).lower() != "serialized-id"
+
+
+def _token_meta(tok):
+    """وصف التوكن من غير ما نكشفه — للـmetadata بس."""
+    d = _jwt_payload(tok)
+    exp = d.get("exp") or 0
+    return {
+        "exp_in_sec": max(0, int(exp - time.time())) if exp else None,
+        "lifetime_sec": (int(exp - d["iat"]) if exp and d.get("iat") else None),
+        "azp": d.get("azp"),
+        "scope": d.get("scope"),
+        "typ": d.get("typ"),
+    }
+
+
+def _click_any(page, selectors):
+    for s in selectors:
+        try:
+            loc = page.locator(s).first
+            if loc.count() > 0:
+                loc.click(force=True, timeout=LOGIN_TIMEOUT_MS)
+                return s
+        except Exception:
+            continue
+    return None
+
+
+def _first_visible(page, selectors):
+    for s in selectors:
+        try:
+            loc = page.locator(s).first
+            if loc.count() > 0 and loc.is_visible():
+                return loc, s
+        except Exception:
+            continue
+    return None, None
+
+
+def _wait_password(page, seconds=25):
+    for _ in range(seconds):
+        try:
+            loc = page.locator("input[type='password']").first
+            if loc.count() > 0 and loc.is_visible():
+                return loc
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return None
+
+
+def _verify_logged_in(page, target, popup_closed, token_seen):
+    """تأكيد إن الدخول عدّى فعلاً — مش مجرد إننا بعتنا الفورم.
+
+    أقوى دليل: اتلقط توكن وصول من الشبكة (مافيش توكن من غير جلسة).
+    الدليل التاني: زرار «تسجيل الدخول» اختفى من البوابة.
+    لو الفورم لسه مفتوح، بنقرا رسالة الخطأ الظاهرة (نص الصفحة بعد
+    التعقيم، من غير أي بيانات دخول) عشان نعرف السبب بدل ما نخمّن.
+    """
+    out = {"popup_closed": popup_closed, "logged_in": False}
+    if token_seen:
+        out["logged_in"] = True
+        out["evidence"] = "اتلقط توكن وصول — الجلسة قائمة"
+        return out
+    if target is not page and not popup_closed:
+        out["login_form_still_open"] = True
+        try:
+            out["form_message"] = _page_error_text(target)
+        except Exception:
+            pass
+        out["evidence"] = "فورم الدخول لسه مفتوح — الدخول ماعداش"
+        return out
+    for _ in range(10):
+        try:
+            entry, _s = _login_entry(page)
+            if entry is None:
+                out["logged_in"] = True
+                out["evidence"] = "زرار تسجيل الدخول اختفى من البوابة"
+                return out
+        except Exception:
+            pass
+        page.wait_for_timeout(2000)
+    out["evidence"] = "زرار تسجيل الدخول لسه ظاهر — الدخول مش مؤكّد"
+    return out
+
+
+def _push_to_worker(tok):
+    """يرفع التوكن للـWorker. بيرجّع (ok, detail) — من غير أي توكن."""
+    if not (WORKER_URL and ADMIN_SECRET):
+        return False, "WORKER_URL/ADMIN_SECRET غير متوفّرين"
+    try:
+        req = urllib.request.Request(
+            WORKER_URL + "/token",
+            data=json.dumps({"token": tok}).encode(),
+            method="POST",
+            headers={"Authorization": f"Bearer {ADMIN_SECRET}",
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return (200 <= r.status < 300), f"worker http {r.status}"
+    except Exception as e:
+        return False, redact(f"{type(e).__name__}: {e}", 150)
+
+
+def _do_renew():
+    """دخول حقيقي → توكن → إثبات الـAPI → رفع للـWorker. metadata فقط."""
+    t0 = time.monotonic()
+    out = {
+        "ok": False,
+        "login_success": False,
+        "token_observed": False,
+        "token_source": None,
+        "api_status": None,
+        "pushed_to_worker": False,
+        "failure_reason": None,
+        "memory_mb": {"before": container_mem()},
+    }
+    if not (DE_PHONE and DE_PASSWORD):
+        out["failure_reason"] = "missing_credentials"
+        out["elapsed_ms"] = round((time.monotonic() - t0) * 1000)
+        return out
+
+    captured = {"tok": None}
+
+    def _grab(request):
+        if captured["tok"]:
+            return
+        try:
+            auth = request.headers.get("authorization", "")
+            if auth.lower().startswith("bearer "):
+                t = auth[7:].strip()
+                if _is_access_token(t):
+                    captured["tok"] = t
+        except Exception:
+            pass
+
+    browser = pw = None
+    try:
+        from playwright.sync_api import sync_playwright
+        pw = sync_playwright().start()
+        try:
+            browser = pw.chromium.launch(headless=True, args=CHROME_ARGS)
+        except Exception as e:
+            # نفرّق ضيق الذاكرة عن أي عطل تشغيل تاني — الاتنين بيبانوا
+            # زي بعض في اللوج، والعلاج مختلف تمامًا.
+            low = str(e).lower()
+            out["failure_reason"] = (
+                "memory_failure"
+                if ("out of memory" in low or "oom" in low
+                    or "cannot allocate" in low)
+                else "chromium_launch_failure")
+            raise
+        ctx = browser.new_context(locale="ar-EG",
+                                  viewport={"width": 1440, "height": 900})
+        ctx.on("page", lambda p: p.on("request", _grab))
+        page = ctx.new_page()
+        page.on("request", _grab)
+        out["memory_mb"]["after_launch"] = container_mem()
+
+        # 1) البوابة + انتظار F5
+        page.goto(PORTAL_URL, wait_until="domcontentloaded",
+                  timeout=PORTAL_TIMEOUT)
+        page.wait_for_timeout(F5_SETTLE_MS)
+
+        # 2) زرار الدخول → popup (البوابة هي اللي تولّد طلب الـauth)
+        entry, _sel = _login_entry(page)
+        if entry is None:
+            out["failure_reason"] = "login_entry_not_found"
+            raise RuntimeError(out["failure_reason"])
+        target = page
+        try:
+            with page.expect_popup(timeout=POPUP_TIMEOUT) as pinfo:
+                entry.click(timeout=LOGIN_TIMEOUT_MS)
+            target = pinfo.value
+        except Exception:
+            page.wait_for_timeout(POPUP_SETTLE_MS)
+        target.wait_for_timeout(POPUP_SETTLE_MS)
+
+        # 3) الموبايل ← التالي
+        fld, _ = _first_visible(target, PHONE_SELECTORS)
+        if fld is None:
+            out["failure_reason"] = "phone_field_not_found"
+            raise RuntimeError(out["failure_reason"])
+        fld.click(force=True)
+        fld.fill("")
+        fld.fill(DE_PHONE)
+        _click_any(target, NEXT_SELECTORS)
+
+        # 4) كلمة السر ← دخول
+        pf = _wait_password(target, 25)
+        if pf is None:
+            out["failure_reason"] = "password_field_not_found"
+            raise RuntimeError(out["failure_reason"])
+        pf.click(force=True)
+        pf.fill("")
+        pf.fill(DE_PASSWORD)
+        _click_any(target, SUBMIT_SELECTORS)
+
+        # 5) استنى الـpopup تقفل / الجلسة تستقر
+        for _ in range(30):
+            try:
+                target.title()
+            except Exception:
+                break
+            time.sleep(1)
+        page.wait_for_timeout(4000)
+        popup_closed = True
+        try:
+            target.title()
+            popup_closed = (target is page)
+        except Exception:
+            pass
+
+        # 6) استنى التوكن يظهر في طلبات الشبكة
+        for i in range(TOKEN_WAIT_SEC):
+            if captured["tok"]:
+                out["token_source"] = "network"
+                break
+            if time.monotonic() - t0 > RENEW_DEADLINE_SEC:
+                out["failure_reason"] = "deadline_exceeded"
+                break
+            if i == 12:
+                # نزور صفحة بتنادي API عشان نستفز طلب فيه Authorization
+                try:
+                    page.goto("https://digital.gov.eg/services",
+                              wait_until="domcontentloaded", timeout=45_000)
+                except Exception:
+                    pass
+            page.wait_for_timeout(1000)
+
+        if not captured["tok"]:
+            for c in ctx.cookies():
+                if c.get("name") in COOKIE_NAMES and _is_access_token(
+                        c.get("value", "")):
+                    captured["tok"] = c["value"]
+                    out["token_source"] = "cookie"
+                    break
+
+        # الحكم على الدخول — بدليل، مش بافتراض. قبل كده كان
+        # login_success بيتحط True من غير أي تحقق، فلو البيانات غلط
+        # الفورم يفضل مفتوح والكود يقول «نجح».
+        out["post_login"] = _verify_logged_in(page, target, popup_closed,
+                                              bool(captured["tok"]))
+        out["login_success"] = bool(out["post_login"].get("logged_in"))
+
+        tok = captured["tok"]
+        if not tok:
+            out["failure_reason"] = (
+                out["failure_reason"]
+                or ("token_not_observed" if out["login_success"]
+                    else "login_not_confirmed"))
+            raise RuntimeError(out["failure_reason"])
+        out["token_observed"] = True
+        out["token"] = _token_meta(tok)      # metadata بس — مش التوكن
+
+        # 7) إثبات إن التوكن بيشتغل على API التتبّع.
+        #    بنستعمل ctx.request عشان الطلب يخرج بهيدرات المتصفح نفسه —
+        #    مفيش انتحال User-Agent.
+        try:
+            ar = ctx.request.post(DE_API, headers={
+                "Authorization": f"Bearer {tok}",
+                "Content-Type": "application/json",
+                "Origin": "https://digital.gov.eg",
+                "Referer": "https://digital.gov.eg/",
+                "Accept": "application/json, text/plain, */*",
+            }, data=json.dumps({
+                "GAName": "PO", "action": "PO_07_00",
+                "data": {"serviceSlug": "PO-07", "barcode": TEST_BARCODE},
+                "taskId": "1-0", "wfId": "PO",
+            }), timeout=45_000)
+            out["api_status"] = ar.status
+            if ar.ok:
+                try:
+                    j = ar.json()
+                    resp = (j or {}).get("response") or {}
+                    # عدد الحالات بس — مفيش أي بيانات شخصية في الرد
+                    out["api_records"] = len(resp.get("itemTrackingRecords") or [])
+                except Exception:
+                    out["api_records"] = None
+        except Exception as e:
+            out["api_error"] = redact(f"{type(e).__name__}: {e}", 120)
+
+        # 8) رفع للـWorker
+        ok, detail = _push_to_worker(tok)
+        out["pushed_to_worker"] = ok
+        out["worker_detail"] = detail
+        out["ok"] = ok and out["api_status"] == 200
+        if not out["ok"] and not out["failure_reason"]:
+            out["failure_reason"] = ("worker_push_failed" if not ok
+                                     else f"api_status_{out['api_status']}")
+    except Exception as e:
+        if not out["failure_reason"]:
+            out["failure_reason"] = redact(f"{type(e).__name__}: {e}", 150)
+    finally:
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+        try:
+            if pw:
+                pw.stop()
+        except Exception:
+            pass
+
+    out["memory_mb"]["after"] = container_mem()
+    out["memory_mb"]["pressure_pct"] = mem_pressure()
+    out["elapsed_ms"] = round((time.monotonic() - t0) * 1000)
+    return out
+
+
+# ---- single-flight: دخول واحد بس في المرة، والباقي بيستنى نتيجته ----
+# ده الضمان الحقيقي ضد login storm: الحاوية واحدة، فقفل داخل العملية
+# كافي ومحسوم — من غير ما نعتمد على اتساق KV.
+_renew_lock = threading.Lock()
+_renew_done = threading.Event()
+_renew_state = {"running": False, "result": None, "finished_at": 0.0}
+
+
+def renew_token():
+    """يجدّد بضمان single-flight + منع تكرار قريب."""
+    now = time.time()
+    with _renew_lock:
+        last = _renew_state["result"]
+        # جدّدنا من شوية ونجح والتوكن لسه بعيد عن الانتهاء؟ مانكررش.
+        if (last and last.get("ok")
+                and now - _renew_state["finished_at"] < RENEW_MIN_GAP_SEC):
+            return {**last, "reused_recent": True}
+        if _renew_state["running"]:
+            join = True
+        else:
+            join = False
+            _renew_state["running"] = True
+            _renew_done.clear()
+
+    if join:
+        if _renew_done.wait(timeout=RENEW_JOIN_TIMEOUT_SEC):
+            return {**(_renew_state["result"] or {}), "joined": True}
+        return {"ok": False, "failure_reason": "join_timeout", "joined": True}
+
+    try:
+        res = _do_renew()
+    except Exception as e:
+        res = {"ok": False,
+               "failure_reason": redact(f"{type(e).__name__}: {e}", 150)}
+    with _renew_lock:
+        _renew_state["result"] = res
+        _renew_state["finished_at"] = time.time()
+        _renew_state["running"] = False
+    _renew_done.set()
+    return res
+
+
+def _renew_summary(res):
+    """يقلّص نتيجة التجديد للعقد المتفق عليه.
+
+    الرد الخارجي بيحمل الحقول دي بس. أي حاجة تانية (نص أخطاء الصفحة،
+    تفاصيل الشبكة، مسار التوكن) بتفضل جوّه الخدمة ومابتخرجش.
+    `expires_at` وقت مطلق بالثواني — مفيش أي جزء من التوكن.
+    """
+    res = res or {}
+    exp_in = ((res.get("token") or {}).get("exp_in_sec")
+              if isinstance(res.get("token"), dict) else None)
+    out = {
+        "success": bool(res.get("ok")),
+        "token_available": bool(res.get("token_observed")),
+        "expires_at": (int(time.time()) + exp_in) if exp_in else None,
+        "elapsed_ms": res.get("elapsed_ms"),
+        "failure_reason": res.get("failure_reason"),
+    }
+    # مؤشرات تشغيلية مالهاش علاقة بأي سر — بتساعد في التشخيص من بعيد
+    for k in ("api_status", "pushed_to_worker", "joined", "reused_recent"):
+        if res.get(k) is not None:
+            out[k] = res[k]
+    return out
+
+
 # ------------------------------------------------------------ HTTP
 class Handler(BaseHTTPRequestHandler):
     def _send(self, obj, code=200):
@@ -734,8 +1165,56 @@ class Handler(BaseHTTPRequestHandler):
                             "memory_failure", "chromium_launch_failure",
                             "timeout", "unknown"],
                         "note": "مفيش credentials ولا login — فحص وصول فقط"})
+        elif path == "/health":
+            last = _renew_state["result"] or {}
+            self._send({
+                "ok": True,
+                "service": "orkestr-f5-test",
+                "renew_configured": bool(DE_PHONE and DE_PASSWORD
+                                         and WORKER_URL and ADMIN_SECRET),
+                "renew_guarded": bool(RENEW_SECRET),
+                "renew_running": _renew_state["running"],
+                "last_renew_ok": last.get("ok"),
+                "last_renew_age_sec": (
+                    round(time.time() - _renew_state["finished_at"])
+                    if _renew_state["finished_at"] else None),
+                "memory_mb": container_mem(),
+            })
         else:
             self._send({"ok": False, "error": "not found"}, 404)
+
+    def do_POST(self):
+        """POST /renew — يجدّد التوكن ويرفعه للـWorker.
+
+        الرد metadata بس: مفيش توكن، مفيش بيانات دخول، مفيش أي جزء
+        منهم. الـendpoint مقفول تمامًا من غير RENEW_SECRET — عشان
+        مايبقاش مفتوح للعالم يشغّل تسجيل دخول.
+        """
+        path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        if path != "/renew":
+            self._send({"ok": False, "error": "not found"}, 404)
+            return
+        if not RENEW_SECRET:
+            self._send({"ok": False,
+                        "error": "renew disabled: RENEW_SECRET غير متعرّف"},
+                       503)
+            return
+        if self.headers.get("Authorization", "") != f"Bearer {RENEW_SECRET}":
+            self._send({"ok": False, "error": "unauthorized"}, 401)
+            return
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > 0:
+                self.rfile.read(min(n, 4096))    # نستهلك الجسم ونتجاهله
+        except Exception:
+            pass
+        try:
+            self._send(_renew_summary(renew_token()))
+        except Exception as e:
+            self._send({"success": False, "token_available": False,
+                        "expires_at": None, "elapsed_ms": None,
+                        "failure_reason":
+                            redact(f"{type(e).__name__}: {e}", 150)}, 500)
 
     def log_message(self, fmt, *args):
         # method + path بس (بدون query عشان المفتاح مايتسجّلش)
