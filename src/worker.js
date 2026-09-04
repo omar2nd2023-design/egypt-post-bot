@@ -258,16 +258,23 @@ async function renewNow(env, onWait = null) {
 async function fetchJourney(barcode, token, env) {
   const base = (env?.RENEWER_URL || '').replace(/\/+$/, '');
   if (!base || !env?.RENEW_SECRET) return { err: 'gateway-not-configured' };
+  const send = () => fetch(base + '/track', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.RENEW_SECRET}`,
+      'Content-Type': 'application/json',
+      'User-Agent': 'egypt-post-bot/1.0',
+    },
+    body: JSON.stringify({ barcode: String(barcode).trim() }),
+  });
   try {
-    const r = await fetch(base + '/track', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${env.RENEW_SECRET}`,
-        'Content-Type': 'application/json',
-        'User-Agent': 'egypt-post-bot/1.0',
-      },
-      body: JSON.stringify({ barcode: String(barcode).trim() }),
-    });
+    let r = await send();
+    // البوابة بتنام لما تقعد فاضية، وأول طلب بيوصلها وهي بتصحى بياخد
+    // 503. محاولة واحدة تانية بعد شوية بتعدّي الاستيقاظ — مفيش تالتة.
+    if (r.status === 502 || r.status === 503 || r.status === 504) {
+      await new Promise((s) => setTimeout(s, 3000));
+      r = await send();
+    }
     if (!r.ok) return { err: `gateway http ${r.status}` };
     const j = await r.json();
     if (j?.err) return { err: j.err };
@@ -415,27 +422,28 @@ async function handleUpdate(env, update, ctx) {
   const notify = (s) =>
     edit(`🔍 <b>${bc}</b>\n━━━━━━━━━━━━━━━━━━━━\n🔑 بنجدّد التوكن... ${s}ث`);
 
-  let token = await getToken(env, ctx, notify);
+  // مدير التوكن بيفضل شغّال عشان KV و/health يفضلوا محدّثين، لكن
+  // نتيجته مابقتش تقفل التتبّع: بعد بوابة Orkestr بقت البوابة هي اللي
+  // بتملك التوكن وبتجدّده بنفسها، فانتهاء توكن الـWorker مايمنعش
+  // رحلة التتبّع. ومابنمرّرش notify هنا عشان المستخدم مايشوفش تفاصيل
+  // التجديد — رسالة واحدة: «بندوّر...» وبعدين النتيجة.
+  const token = await getToken(env, ctx);
 
-  if (!token) {
-    journey = { err: 'refresh-failed' };
-  } else {
-    try {
-      journey = await fetchJourney(bc, token, env);
-      if (journey.err === 'expired') {
-        // التوكن اترفض وإحنا بنشتغل. نجدّد ونعيد **مرة واحدة بس** —
-        // العلم ده بيمنع أي دورة إعادة لا نهائية.
-        await edit(`🔍 <b>${bc}</b>\n━━━━━━━━━━━━━━━━━━━━\n🔑 بنجدّد التوكن...`);
-        const fresh = await renewNow(env, notify);
-        journey = fresh
-          ? await fetchJourney(bc, fresh, env)
-          : { err: 'refresh-failed' };
-        // لو التاني برضه اترفض، بنوقف هنا — مفيش محاولة تالتة.
-        if (journey.err === 'expired') journey = { err: 'refresh-failed' };
-      }
-    } catch (e) {
-      journey = { err: String(e).slice(0, 60) };
+  try {
+    journey = await fetchJourney(bc, token, env);
+    if (journey.err === 'expired') {
+      // التوكن اترفض وإحنا بنشتغل. نجدّد ونعيد **مرة واحدة بس** —
+      // العلم ده بيمنع أي دورة إعادة لا نهائية.
+      await edit(`🔍 <b>${bc}</b>\n━━━━━━━━━━━━━━━━━━━━\n🔑 بنجدّد التوكن...`);
+      const fresh = await renewNow(env, notify);
+      journey = fresh
+        ? await fetchJourney(bc, fresh, env)
+        : { err: 'refresh-failed' };
+      // لو التاني برضه اترفض، بنوقف هنا — مفيش محاولة تالتة.
+      if (journey.err === 'expired') journey = { err: 'refresh-failed' };
     }
+  } catch (e) {
+    journey = { err: String(e).slice(0, 60) };
   }
 
   await edit(buildReply(bc, row, journey));
