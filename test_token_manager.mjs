@@ -296,5 +296,50 @@ console.log('\n--- Case 15: البوابة نايمة (503) → إعادة وا�
   check('نجح بعد الاستيقاظ', r.records.length, 1);
   check('نداءين بالظبط — مفيش تالت', n, 2);
 }
+console.log('\n--- Case 16: notify بيتبعت للبوابة لما يكون متاح ---');
+{
+  const env = { RENEWER_URL: 'https://gw.test', RENEW_SECRET: 's3cr3t' };
+  let seen = null;
+  globalThis.fetch = async (u, init) => {
+    seen = JSON.parse(init.body);
+    return { ok: true, status: 200,
+             json: async () => ({ records: [], status: '' }) };
+  };
+  await mod.fetchJourney('EKPB0412385EG', null, env, 18000,
+                         { chat_id: 55, message_id: 66 });
+  check('الباركود اتبعت', seen.barcode, 'EKPB0412385EG');
+  check('notify موجود', !!seen.notify, true);
+  check('chat_id', seen.notify.chat_id, 55);
+  check('message_id', seen.notify.message_id, 66);
+  check('الميزانية اتبعتت معاه', seen.notify.budget_ms, 18000);
+}
+
+console.log('\n--- Case 17: من غير notify الجسم زي ما هو ---');
+{
+  const env = { RENEWER_URL: 'https://gw.test', RENEW_SECRET: 's3cr3t' };
+  let seen = null;
+  globalThis.fetch = async (u, init) => {
+    seen = JSON.parse(init.body);
+    return { ok: true, status: 200,
+             json: async () => ({ records: [], status: '' }) };
+  };
+  await mod.fetchJourney('X', null, env, 18000);
+  check('مفاتيح الجسم: barcode بس', Object.keys(seen), ['barcode']);
+  check('مفيش notify', 'notify' in seen, false);
+}
+
+console.log('\n--- Case 18: مفيش نداء ذاتي في الكود ---');
+{
+  const fs = await import('node:fs');
+  const src = fs.readFileSync(
+    new URL('./src/worker.js', import.meta.url), 'utf8');
+  check('صفر handoff', /handoff/.test(src), false);
+  check('صفر WORKER_URL', /WORKER_URL/.test(src), false);
+  check('/finish بـRENEW_SECRET',
+        /finish[\s\S]{0,200}RENEW_SECRET/.test(src), true);
+  check('renderResult موجودة', /async function renderResult/.test(src), true);
+  const selfCalls = (src.match(/fetch\(\s*env\.\w*WORKER/g) || []).length;
+  check('مفيش fetch لعنوان الـWorker', selfCalls, 0);
+}
 console.log(FAILED === 0 ? '\nALL PASS' : `\n${FAILED} FAILED`);
 process.exit(FAILED === 0 ? 0 : 1);

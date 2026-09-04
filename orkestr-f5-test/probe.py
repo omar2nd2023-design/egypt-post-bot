@@ -1190,6 +1190,47 @@ def track(barcode):
     return out
 
 
+# ---- التسليم: لما الطالب يسيبنا، بنوصّل النتيجة بنفسنا ----
+# الـWorker عنده 30 ثانية كحد أقصى للاستدعاء، والتجديد البارد لوحده
+# بياخد ~30. فلما بيطلب /track وبنطوّل، مهلته بتخلص وبيقفل الاتصال —
+# لكن إحنا بنكمّل الشغل عادي. لو بعتلنا notify، بنبعتله النتيجة على
+# /finish لما نخلّص، فيعدّل رسالة تليجرام من غير ما المستخدم يعيد
+# إرسال الباركود.
+#
+# الاتجاه ده (Orkestr → Worker) **مُثبَت إنه شغّال** — هو نفسه اللي
+# بنرفع بيه التوكن. الاتجاه العكسي (الـWorker بينده على نفسه) اتجرّب
+# وفشل: Cloudflare بتمنع الحلقات المفرغة.
+
+NOTIFY_DEFAULT_BUDGET_MS = 18_000
+
+
+def _deliver(notify, bc, res):
+    """يبعت نتيجة التتبّع للـWorker. بيرجّع (ok, detail).
+
+    مابنسجّلش أي جزء من النتيجة — فيها بيانات شخصية. الرد بيتسجّل
+    كرقم حالة بس.
+    """
+    if not (WORKER_URL and RENEW_SECRET):
+        return False, "WORKER_URL/RENEW_SECRET غير متوفّرين"
+    try:
+        body = json.dumps({
+            "chat_id": notify.get("chat_id"),
+            "message_id": notify.get("message_id"),
+            "barcode": bc,
+            "result": res,
+        }).encode()
+        req = urllib.request.Request(
+            WORKER_URL + "/finish", data=body, method="POST",
+            headers={"Authorization": f"Bearer {RENEW_SECRET}",
+                     "Content-Type": "application/json",
+                     # من غيره Cloudflare بتحجب Python-urllib بخطأ 1010
+                     "User-Agent": "egypt-post-renewer/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return (200 <= r.status < 300), f"worker http {r.status}"
+    except Exception as e:
+        return False, redact(f"{type(e).__name__}: {e}", 120)
+
+
 def _renew_summary(res):
     """يقلّص نتيجة التجديد للعقد المتفق عليه.
 
@@ -1305,17 +1346,33 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/track":
             try:
-                bc = (json.loads(raw or b"{}") or {}).get("barcode", "")
+                payload = json.loads(raw or b"{}") or {}
             except Exception:
-                bc = ""
-            bc = str(bc).strip()
+                payload = {}
+            bc = str(payload.get("barcode", "")).strip()
+            # notify اختياري تمامًا. من غيره /track بيشتغل زي ما هو
+            # بالظبط: بينفّذ ويرد، وخلاص.
+            notify = payload.get("notify") or None
             if not bc:
                 self._send({"err": "missing barcode"}, 400)
                 return
+            t0 = time.monotonic()
             try:
-                self._send(track(bc))
+                res = track(bc)
             except Exception as e:
                 self._send({"err": redact(f"{type(e).__name__}: {e}", 80)}, 500)
+                return
+            # لو طوّلنا أكتر من ميزانية الطالب، يبقى مهلته خلصت وقفل
+            # الاتصال — فبنوصّله النتيجة على /finish بدل ما تضيع.
+            if isinstance(notify, dict):
+                budget = notify.get("budget_ms") or NOTIFY_DEFAULT_BUDGET_MS
+                try:
+                    budget = float(budget)
+                except Exception:
+                    budget = NOTIFY_DEFAULT_BUDGET_MS
+                if (time.monotonic() - t0) * 1000 >= budget:
+                    _deliver(notify, bc, res)
+            self._send(res)
             return
 
         try:

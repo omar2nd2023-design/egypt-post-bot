@@ -261,10 +261,16 @@ async function renewNow(env, onWait = null) {
  * وبتتولّى إعادة المحاولة مرة واحدة لو الـAPI رفضه. الباراميتر `token`
  * باقي عشان مواضع النداء ماتتغيّرش أكتر من اللازم.
  */
-async function fetchJourney(barcode, token, env, budgetMs = 25000) {
+async function fetchJourney(barcode, token, env, budgetMs = 25000,
+                            notify = null) {
   const base = (env?.RENEWER_URL || '').replace(/\/+$/, '');
   if (!base || !env?.RENEW_SECRET) return { err: 'gateway-not-configured' };
   const started = Date.now();
+  // notify اختياري. من غيره البوابة بتشتغل زي ما هي بالظبط: بتنفّذ
+  // وترد وخلاص. لو موجود وطوّلت أكتر من ميزانيتنا، بتوصّل النتيجة
+  // على /finish — لأن مهلتنا بتكون خلصت وقفلنا الاتصال.
+  const payload = { barcode: String(barcode).trim() };
+  if (notify) payload.notify = { ...notify, budget_ms: budgetMs };
   const send = () => fetch(base + '/track', {
     method: 'POST',
     headers: {
@@ -272,7 +278,7 @@ async function fetchJourney(barcode, token, env, budgetMs = 25000) {
       'Content-Type': 'application/json',
       'User-Agent': 'egypt-post-bot/1.0',
     },
-    body: JSON.stringify({ barcode: String(barcode).trim() }),
+    body: JSON.stringify(payload),
     // ميزانية صريحة: الاستدعاء كله عنده 30 ثانية، والتجديد البارد
     // لوحده بياخد ~30. لو مالحقناش، بنرجّع timeout والمنادي بيقرر.
     signal: AbortSignal.timeout(Math.max(1000, budgetMs - (Date.now() - started))),
@@ -290,8 +296,8 @@ async function fetchJourney(barcode, token, env, budgetMs = 25000) {
     if (j?.err) return { err: j.err };
     return { records: j?.records || [], status: j?.status || '' };
   } catch (e) {
-    // الميزانية خلصت والبوابة لسه بتجدّد — علم خاص عشان المنادي
-    // يسلّم المهمة لاستدعاء جديد بدل ما الرسالة تتجمّد.
+    // الميزانية خلصت والبوابة لسه شغّالة. لو بعتنا notify، هي اللي
+    // هتوصّل النتيجة على /finish — فمافيش حاجة علينا نعملها.
     if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
       return { err: 'timeout' };
     }
@@ -300,20 +306,21 @@ async function fetchJourney(barcode, token, env, budgetMs = 25000) {
 }
 
 /**
- * يكمّل الطلب ويعدّل نفس رسالة تليجرام. بيتنده من مسارين:
- * من handleUpdate في الحالة العادية، ومن /resume لما الاستدعاء
- * الأول ما يلحقش في ميزانيته.
+ * بيرسم النتيجة النهائية في نفس رسالة تليجرام.
  *
- * بيعيد استعلام Turso بدل ما يمرّر الصف في جسم HTTP — الصف فيه
+ * بيتنده من /finish بس، لما البوابة تكون خلّصت شغلها بعد ما مهلتنا
+ * خلصت وبعتتلنا النتيجة. مابيجيبش التتبّع تاني — النتيجة جايّة معاه،
+ * فمفيش نداء زيادة على البوابة ولا على API البريد.
+ *
+ * بيعيد استعلام Turso بدل ما الصف يتنقل في جسم HTTP — الصف فيه
  * بيانات شخصية، والاستعلام رخيص.
  */
-async function completeTrack(env, chatId, msgId, bc, budgetMs) {
+async function renderResult(env, chatId, msgId, bc, journey) {
   let row = null;
   try {
     const rows = await tursoQuery(env, 'SELECT * FROM bc WHERE code = ?', [bc]);
     row = rows[0] || null;
   } catch (e) { /* الفهرس مش متاح — نكمّل بالتتبّع الحيّ */ }
-  const journey = await fetchJourney(bc, null, env, budgetMs);
   await tg(env, 'editMessageText', {
     chat_id: chatId, message_id: msgId,
     text: buildReply(bc, row, journey),
@@ -475,16 +482,21 @@ async function handleUpdate(env, update, ctx) {
   ]);
 
   // ميزانية النداء الأول أقل من حد الـ30 ثانية بهامش، عشان يفضل
-  // وقت نسلّم فيه المهمة لو التجديد طوّل.
+  // وقت نكتب فيه رسالة مؤقتة لو التجديد طوّل.
+  //
+  // deliverTo: بنقول للبوابة فين تبعت النتيجة لو طوّلت ومهلتنا خلصت.
+  // من غير msgId مافيش رسالة نعدّلها، فمابنبعتوش.
+  const deliverTo = msgId ? { chat_id: chatId, message_id: msgId } : null;
+
   try {
-    journey = await fetchJourney(bc, token, env, TRACK_BUDGET_MS);
+    journey = await fetchJourney(bc, token, env, TRACK_BUDGET_MS, deliverTo);
     if (journey.err === 'expired') {
       // التوكن اترفض وإحنا بنشتغل. نجدّد ونعيد **مرة واحدة بس** —
       // العلم ده بيمنع أي دورة إعادة لا نهائية.
       await edit(`🔍 <b>${bc}</b>\n━━━━━━━━━━━━━━━━━━━━\n🔑 بنجدّد التوكن...`);
       const fresh = await renewNow(env, notify);
       journey = fresh
-        ? await fetchJourney(bc, fresh, env, TRACK_BUDGET_MS)
+        ? await fetchJourney(bc, fresh, env, TRACK_BUDGET_MS, deliverTo)
         : { err: 'refresh-failed' };
       // لو التاني برضه اترفض، بنوقف هنا — مفيش محاولة تالتة.
       if (journey.err === 'expired') journey = { err: 'refresh-failed' };
@@ -494,44 +506,18 @@ async function handleUpdate(env, update, ctx) {
   }
 
   // البوابة لسه بتجدّد والميزانية خلصت. بدل ما الرسالة تتجمّد،
-  // بنسلّم المهمة لاستدعاء تاني بميزانية جديدة — **مرة واحدة بس**،
-  // ومسار /resume مابيسلّمش تاني فمفيش أي سلسلة لا نهائية.
-  // المستخدم مابيعملش حاجة: نفس الرسالة هي اللي هتتعدّل بالنتيجة.
-  if (journey?.err === 'timeout' && msgId && ctx && handoffReady(env)) {
+  // البوابة لسه بتشتغل ومهلتنا خلصت. مش هننده على نفسنا — ده اتجرّب
+  // وCloudflare بتمنعه. بدل كده بعتنا notify مع الطلب، والبوابة هي
+  // اللي هتنده علينا على /finish أول ما تخلّص، وهي تعدّل الرسالة.
+  // المستخدم مابيعملش حاجة — نفس الرسالة هتتحدّث بالنتيجة.
+  if (journey?.err === 'timeout' && deliverTo) {
     await edit(`🔍 <b>${bc}</b>\n━━━━━━━━━━━━━━━━━━━━\n⏳ بندوّر... (بناخد وقت زيادة شوية)`);
-    // await مش ctx.waitUntil: إحنا جوّه waitUntil أصلاً، ولو ضفنا
-    // واحدة متداخلة، الاستدعاء بيخلص عند return ويلغي الطلب وهو
-    // طاير. التسليم بيرجع في ~0.4 ثانية لأن /finish بيرد فورًا
-    // ويكمّل الشغل لوحده.
-    await handoff(env, chatId, msgId, bc);
     return;
   }
 
   await edit(buildReply(bc, row, journey));
 }
 
-/** هل التسليم متظبّط؟ محتاج عنوان الـWorker نفسه وسر الإدارة. */
-function handoffReady(env) {
-  return !!(env.WORKER_URL && env.ADMIN_SECRET);
-}
-
-/**
- * بينده الـWorker على نفسه عشان ياخد ميزانية 30 ثانية جديدة.
- * استدعاء واحد إضافي، وبس في الحالة الباردة — مفيش cron ولا polling.
- */
-async function handoff(env, chatId, msgId, bc) {
-  try {
-    await fetch(env.WORKER_URL.replace(/\/+$/, '') + '/finish', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${env.ADMIN_SECRET}`,
-        'Content-Type': 'application/json',
-        'User-Agent': 'egypt-post-bot/1.0',
-      },
-      body: JSON.stringify({ chat_id: chatId, message_id: msgId, barcode: bc }),
-    });
-  } catch (e) { /* فشل التسليم — الرسالة هتفضل على آخر حالة اتكتبت */ }
-}
 
 // ---------------------------------------------------------------- Entry
 export default {
@@ -553,21 +539,21 @@ export default {
       });
     }
 
-    // الاستدعاء الأول ما لحقش في ميزانيته، فسلّم المهمة هنا.
-    // ميزانية جديدة كاملة. **مافيش تسليم تاني من هنا** — النتيجة
-    // بتتكتب في نفس الرسالة أيًا كانت، فمفيش سلسلة لا نهائية.
+    // البوابة بتنده هنا لما تخلص شغل طول أكتر من مهلتنا. النتيجة
+    // جاية معاها جاهزة — إحنا بنرسمها في الرسالة وبس، مفيش نداء
+    // زيادة على البوابة ولا على API البريد.
     if (url.pathname === '/finish' && request.method === 'POST') {
       const auth = request.headers.get('Authorization') || '';
-      if (auth !== `Bearer ${env.ADMIN_SECRET}`) {
+      if (auth !== `Bearer ${env.RENEW_SECRET}`) {
         return new Response('unauthorized', { status: 401 });
       }
-      const { chat_id, message_id, barcode } = await request.json();
+      const { chat_id, message_id, barcode, result } = await request.json();
       if (!chat_id || !message_id || !barcode) {
         return new Response('missing fields', { status: 400 });
       }
       ctx.waitUntil(
-        completeTrack(env, chat_id, message_id, String(barcode), 26000)
-          .catch(() => {}));
+        renderResult(env, chat_id, message_id, String(barcode),
+                     result || { err: 'no-result' }).catch(() => {}));
       return new Response('ok');
     }
 
