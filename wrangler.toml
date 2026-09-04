@@ -12,6 +12,8 @@ id = "3ebd5cf4f20547f4a88e1b9948ccc22a"
 GITHUB_REPO = "omar2nd2023-design/egypt-post-bot"
 # خدمة التجديد على Orkestr — hostname عام، مش سر
 RENEWER_URL = "https://egypt-post-f5-test.orkestr.run"
+# عنوان الـWorker نفسه — بيستعمله التسليم الداخلي لـ/resume. مش سر.
+WORKER_URL = "https://egypt-post-bot.awladywebanaty.workers.dev"
 
 # السرّيات (بتتحط بـwrangler secret put، مش هنا):
 #   TELEGRAM_BOT_TOKEN
