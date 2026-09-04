@@ -499,7 +499,11 @@ async function handleUpdate(env, update, ctx) {
   // المستخدم مابيعملش حاجة: نفس الرسالة هي اللي هتتعدّل بالنتيجة.
   if (journey?.err === 'timeout' && msgId && ctx && handoffReady(env)) {
     await edit(`🔍 <b>${bc}</b>\n━━━━━━━━━━━━━━━━━━━━\n⏳ بندوّر... (بناخد وقت زيادة شوية)`);
-    ctx.waitUntil(handoff(env, chatId, msgId, bc));
+    // await مش ctx.waitUntil: إحنا جوّه waitUntil أصلاً، ولو ضفنا
+    // واحدة متداخلة، الاستدعاء بيخلص عند return ويلغي الطلب وهو
+    // طاير. التسليم بيرجع في ~0.4 ثانية لأن /finish بيرد فورًا
+    // ويكمّل الشغل لوحده.
+    await handoff(env, chatId, msgId, bc);
     return;
   }
 
