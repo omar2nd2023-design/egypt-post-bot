@@ -1008,6 +1008,10 @@ def _do_renew():
             raise RuntimeError(out["failure_reason"])
         out["token_observed"] = True
         out["token"] = _token_meta(tok)      # metadata بس — مش التوكن
+        # نحتفظ بيه في الذاكرة عشان /track يستعمله. مابيتكتبش على
+        # القرص ومابيخرجش في أي رد — الخدمة دي هي اللي أصدرته أصلاً،
+        # فمفيش داعي ينتقل بين الخدمتين تاني.
+        _token_cache["tok"] = tok
 
         # 7) إثبات إن التوكن بيشتغل على API التتبّع.
         #    بنستعمل ctx.request عشان الطلب يخرج بهيدرات المتصفح نفسه —
@@ -1107,6 +1111,85 @@ def renew_token():
     return res
 
 
+# ============================================================ بوابة التتبّع
+# ليه هنا؟ القياس أثبت إن شبكة Cloudflare مش قادرة توصل الأصل المصري
+# (41.33.95.173): الـWorker بياخد 522 بعد ~850 ثانية، بينما Orkestr
+# بتاخد 200 والجهاز المحلي بياخد رد في 147ms. فالـWorker بقى واجهة
+# تليجرام ومدير التوكن، وOrkestr بقت المنفذ للـAPI.
+#
+# التوكن مابيسافرش: الخدمة دي هي اللي أصدرته، فبتستعمله من ذاكرتها.
+
+_token_cache = {"tok": None}
+
+
+def _token_fresh(tok, margin=60):
+    """توكن وصول صالح ولسه بعيد عن الانتهاء بهامش."""
+    if not _is_access_token(tok):
+        return False
+    return (_jwt_payload(tok).get("exp") or 0) - margin > time.time()
+
+
+def _get_token(margin=60):
+    """توكن صالح من الذاكرة، وإلا بيجدّد بنفس single-flight الموجود.
+    مابيرجّعش التوكن لأي جهة خارجية — للاستعمال الداخلي بس."""
+    tok = _token_cache.get("tok")
+    if _token_fresh(tok, margin):
+        return tok
+    renew_token()                      # القفل ومنع التكرار زي ما هما
+    tok = _token_cache.get("tok")
+    return tok if _token_fresh(tok, 0) else None
+
+
+def _fetch_journey(barcode, tok):
+    """نفس نداء fetchJourney بتاع الـWorker بالظبط — نفس الـendpoint
+    ونفس الـpayload ونفس الهيدرات ونفس شكل الرد."""
+    body = json.dumps({
+        "GAName": "PO", "action": "PO_07_00",
+        "data": {"serviceSlug": "PO-07", "barcode": str(barcode).strip()},
+        "taskId": "1-0", "wfId": "PO",
+    }).encode()
+    req = urllib.request.Request(DE_API, data=body, method="POST", headers={
+        "Authorization": f"Bearer {tok}",
+        "Content-Type": "application/json",
+        "Origin": "https://digital.gov.eg",
+        "Referer": "https://digital.gov.eg/",
+        "Accept": "application/json, text/plain, */*",
+        # الـWAF بتاع مصر الرقمية بيرفض الطلبات من غير User-Agent متصفح
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/131.0.0.0 Safari/537.36"),
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=45) as r:
+            data = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return {"err": "expired" if e.code == 401 else f"http {e.code}"}
+    except Exception as e:
+        return {"err": redact(f"{type(e).__name__}: {e}", 80)}
+    resp = (data or {}).get("response") or {}
+    return {"records": resp.get("itemTrackingRecords") or [],
+            "status": resp.get("shipmentStatus") or ""}
+
+
+def track(barcode):
+    """تتبّع باركود. بيدير التوكن داخليًا، وبيعيد المحاولة مرة واحدة
+    بس لو الـAPI رفض التوكن. الرد مافيهوش أي توكن."""
+    tok = _get_token()
+    if not tok:
+        return {"err": "no-token"}
+    out = _fetch_journey(barcode, tok)
+    if out.get("err") == "expired":
+        # الجلسة اتلغت من الخادم — نجدّد ونعيد **مرة واحدة بس**
+        _token_cache["tok"] = None
+        tok = _get_token()
+        if not tok:
+            return {"err": "refresh-failed"}
+        out = _fetch_journey(barcode, tok)
+        if out.get("err") == "expired":
+            return {"err": "refresh-failed"}
+    return out
+
+
 def _renew_summary(res):
     """يقلّص نتيجة التجديد للعقد المتفق عليه.
 
@@ -1202,23 +1285,39 @@ class Handler(BaseHTTPRequestHandler):
         مايبقاش مفتوح للعالم يشغّل تسجيل دخول.
         """
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
-        if path != "/renew":
+        if path not in ("/renew", "/track"):
             self._send({"ok": False, "error": "not found"}, 404)
             return
         if not RENEW_SECRET:
             self._send({"ok": False,
-                        "error": "renew disabled: RENEW_SECRET غير متعرّف"},
-                       503)
+                        "error": "disabled: RENEW_SECRET غير متعرّف"}, 503)
             return
         if self.headers.get("Authorization", "") != f"Bearer {RENEW_SECRET}":
             self._send({"ok": False, "error": "unauthorized"}, 401)
             return
+        raw = b""
         try:
             n = int(self.headers.get("Content-Length") or 0)
             if n > 0:
-                self.rfile.read(min(n, 4096))    # نستهلك الجسم ونتجاهله
+                raw = self.rfile.read(min(n, 4096))
         except Exception:
             pass
+
+        if path == "/track":
+            try:
+                bc = (json.loads(raw or b"{}") or {}).get("barcode", "")
+            except Exception:
+                bc = ""
+            bc = str(bc).strip()
+            if not bc:
+                self._send({"err": "missing barcode"}, 400)
+                return
+            try:
+                self._send(track(bc))
+            except Exception as e:
+                self._send({"err": redact(f"{type(e).__name__}: {e}", 80)}, 500)
+            return
+
         try:
             self._send(_renew_summary(renew_token()))
         except Exception as e:

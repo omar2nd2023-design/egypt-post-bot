@@ -330,5 +330,78 @@ for name in ("DE_PHONE", "DE_PASSWORD", "WORKER_URL", "ADMIN_SECRET",
     check(f"{name} من os.environ",
           f'{name} = os.environ.get("{name}"' in src, True)
 
+print("\n--- 13) بوابة التتبّع: المسار السعيد ---")
+_orig_fj, _orig_renew = probe._fetch_journey, probe.renew_token
+probe._token_cache["tok"] = mk_jwt(900)
+hits = {"n": 0}
+
+
+def _fj_ok(bc, tok):
+    hits["n"] += 1
+    return {"records": [{"a": 1}, {"a": 2}], "status": "تم التسليم"}
+
+
+probe._fetch_journey = _fj_ok
+r = probe.track("EKPB0412385EG")
+check("رجّع السجلات", len(r["records"]), 2)
+check("رجّع الحالة", r["status"], "تم التسليم")
+check("نداء واحد بس", hits["n"], 1)
+check("مفيش توكن في الرد", "eyJ" in json.dumps(r, ensure_ascii=False), False)
+
+print("\n--- 14) مفيش توكن والتجديد فشل ---")
+probe._token_cache["tok"] = None
+probe.renew_token = lambda: {"ok": False}
+check("رجّع no-token", probe.track("X"), {"err": "no-token"})
+
+print("\n--- 15) الـAPI رفض التوكن → تجديد وإعادة مرة واحدة ---")
+probe._token_cache["tok"] = mk_jwt(900)
+seq = {"i": 0}
+
+
+def _fj_once(bc, tok):
+    seq["i"] += 1
+    return ({"err": "expired"} if seq["i"] == 1
+            else {"records": [{"a": 9}], "status": "ok"})
+
+
+probe._fetch_journey = _fj_once
+probe.renew_token = lambda: probe._token_cache.__setitem__("tok", mk_jwt(900))
+r = probe.track("X")
+check("نجح بعد التجديد", len(r["records"]), 1)
+check("محاولتين بالظبط", seq["i"], 2)
+
+print("\n--- 16) رفض مرتين → فشل محكوم، مفيش لوب ---")
+probe._token_cache["tok"] = mk_jwt(900)
+seq2 = {"i": 0}
+
+
+def _fj_always(bc, tok):
+    seq2["i"] += 1
+    return {"err": "expired"}
+
+
+probe._fetch_journey = _fj_always
+check("رجّع refresh-failed", probe.track("X"), {"err": "refresh-failed"})
+check("وقف عند محاولتين", seq2["i"], 2)
+
+print("\n--- 17) توكن منتهي في الذاكرة → بيتجدّد ---")
+probe._token_cache["tok"] = mk_jwt(-10)
+probe._fetch_journey = _fj_ok
+hits["n"] = 0
+renews = {"n": 0}
+
+
+def _renew_sets(*_a):
+    renews["n"] += 1
+    probe._token_cache["tok"] = mk_jwt(900)
+
+
+probe.renew_token = _renew_sets
+r = probe.track("X")
+check("جدّد قبل النداء", renews["n"], 1)
+check("ورجّع نتيجة", len(r["records"]), 2)
+
+probe._fetch_journey, probe.renew_token = _orig_fj, _orig_renew
+
 print("\n" + ("ALL PASS" if not FAILED else f"{len(FAILED)} FAILED: {FAILED}"))
 sys.exit(0 if not FAILED else 1)

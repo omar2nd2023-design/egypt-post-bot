@@ -239,35 +239,42 @@ async function renewNow(env, onWait = null) {
 }
 
 // ---------------------------------------------------------------- DE API
-async function fetchJourney(barcode, token) {
-  const r = await fetch(DE_API, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      'Origin': 'https://digital.gov.eg',
-      'Referer': 'https://digital.gov.eg/',
-      'Accept': 'application/json, text/plain, */*',
-      // ⚠ الـWAF بتاع مصر الرقمية بيرفض الطلبات من غير User-Agent متصفح
-      // (بيرجّع 522). ده السبب اللي خلّى البوت يفشل والـ/debug ينجح.
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    },
-    body: JSON.stringify({
-      GAName: 'PO',
-      action: 'PO_07_00',
-      data: { serviceSlug: 'PO-07', barcode: String(barcode).trim() },
-      taskId: '1-0',
-      wfId: 'PO',
-    }),
-  });
-  if (r.status === 401) return { err: 'expired' };
-  if (!r.ok) return { err: `http ${r.status}` };
-  const j = await r.json();
-  const resp = j?.response || {};
-  return {
-    records: resp.itemTrackingRecords || [],
-    status: resp.shipmentStatus || '',
-  };
+/**
+ * التتبّع الحيّ — بيعدّي على بوابة Orkestr بدل ما ينادي API مصر الرقمية
+ * مباشرة.
+ *
+ * ليه؟ القياس أثبت إن شبكة Cloudflare مش قادرة توصل الأصل المصري
+ * (41.33.95.173): الطلب من هنا بياخد 522 بعد ~850 ثانية، بينما نفس
+ * الطلب من Orkestr بياخد 200 ومن جهاز محلي بياخد رد في 147ms. الفرق
+ * الوحيد هو الشبكة اللي الطلب طالع منها — مش الكود ولا التوكن.
+ *
+ * الشكل اللي بيرجع زي ما هو بالظبط ({records, status} أو {err})،
+ * فـbuildReply وكل سلوك تليجرام ماتغيروش.
+ *
+ * التوكن مابيسافرش: البوابة هي اللي أصدرته وبتستعمله من ذاكرتها،
+ * وبتتولّى إعادة المحاولة مرة واحدة لو الـAPI رفضه. الباراميتر `token`
+ * باقي عشان مواضع النداء ماتتغيّرش أكتر من اللازم.
+ */
+async function fetchJourney(barcode, token, env) {
+  const base = (env?.RENEWER_URL || '').replace(/\/+$/, '');
+  if (!base || !env?.RENEW_SECRET) return { err: 'gateway-not-configured' };
+  try {
+    const r = await fetch(base + '/track', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RENEW_SECRET}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'egypt-post-bot/1.0',
+      },
+      body: JSON.stringify({ barcode: String(barcode).trim() }),
+    });
+    if (!r.ok) return { err: `gateway http ${r.status}` };
+    const j = await r.json();
+    if (j?.err) return { err: j.err };
+    return { records: j?.records || [], status: j?.status || '' };
+  } catch (e) {
+    return { err: String(e).slice(0, 60) };
+  }
 }
 
 // ---------------------------------------------------------------- Format
@@ -414,14 +421,14 @@ async function handleUpdate(env, update, ctx) {
     journey = { err: 'refresh-failed' };
   } else {
     try {
-      journey = await fetchJourney(bc, token);
+      journey = await fetchJourney(bc, token, env);
       if (journey.err === 'expired') {
         // التوكن اترفض وإحنا بنشتغل. نجدّد ونعيد **مرة واحدة بس** —
         // العلم ده بيمنع أي دورة إعادة لا نهائية.
         await edit(`🔍 <b>${bc}</b>\n━━━━━━━━━━━━━━━━━━━━\n🔑 بنجدّد التوكن...`);
         const fresh = await renewNow(env, notify);
         journey = fresh
-          ? await fetchJourney(bc, fresh)
+          ? await fetchJourney(bc, fresh, env)
           : { err: 'refresh-failed' };
         // لو التاني برضه اترفض، بنوقف هنا — مفيش محاولة تالتة.
         if (journey.err === 'expired') journey = { err: 'refresh-failed' };
