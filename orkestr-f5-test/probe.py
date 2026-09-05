@@ -54,6 +54,11 @@ PROBE_KEY = os.environ.get("PROBE_KEY", "").strip()   # حارس للـendpoint 
 
 PORTAL_URL = "https://digital.gov.eg/"
 
+# بوابة الشكاوى (SMAX) — هدف فحص وصول فقط.
+# ⚠️ مكتوب ثابت عن قصد. مافيش URL parameter على /smax عشان الـendpoint
+#    مايبقاش بوابة SSRF تجيب أي عنوان من بره.
+SMAX_URL = "https://support.degypt.net/saw/Requests"
+
 # نفس الـissuer والـclient اللي في التوكن الحالي (iss / azp).
 # مفيش هنا أي سر — دي قيم عامة بتظهر في أي JWT.
 KC_BASE = "https://login.di.gov.eg/realms/digitalegypt"
@@ -376,6 +381,149 @@ def _form_fields(page):
 
 
 # ------------------------------------------------------------ الاختبار
+def run_smax_probe():
+    """فحص وصول لبوابة الشكاوى — قراءة فقط، من غير credentials.
+
+    بيجاوب على سؤال واحد: هل Orkestr بيوصل لـsupport.degypt.net زي ما
+    بيوصل لمصر الرقمية؟ وهل F5 بيرمي تحدّي على الـegress ده؟
+
+    ⚠️ مافيش تسجيل دخول. مافيش كتابة في أي حقل. أسماء الكوكيز بس
+       من غير قيمها.
+    """
+    res = {
+        "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "target": SMAX_URL,
+        "memory_mb": {"before": container_mem()},
+        "chromium": {},
+        "page": {},
+    }
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        res["verdict"] = "FAIL"
+        res["diagnosis"] = "chromium_launch_failure"
+        res["error"] = f"playwright import: {type(e).__name__}: {e}"[:200]
+        return res
+
+    browser = None
+    pw = None
+    tspd_seen = []
+    try:
+        pw = sync_playwright().start()
+        t0 = time.monotonic()
+        try:
+            browser = pw.chromium.launch(headless=True, args=CHROME_ARGS)
+        except Exception as e:
+            res["chromium"] = {"launched": False,
+                               "error": f"{type(e).__name__}: {e}"[:300]}
+            res["verdict"] = "FAIL"
+            low = str(e).lower()
+            res["diagnosis"] = ("memory_failure"
+                                if ("out of memory" in low or "oom" in low
+                                    or "cannot allocate" in low)
+                                else "chromium_launch_failure")
+            return res
+
+        res["chromium"] = {"launched": True,
+                           "launch_ms": round((time.monotonic() - t0) * 1000),
+                           "browser_version": browser.version}
+        res["memory_mb"]["after_launch"] = container_mem()
+
+        ctx = browser.new_context(locale="ar-EG",
+                                  viewport={"width": 1440, "height": 900})
+        page = ctx.new_page()
+
+        def _on_response(r):
+            try:
+                if "/TSPD/" in r.url:
+                    tspd_seen.append({"url": safe_url(r.url, 120),
+                                      "status": r.status})
+            except Exception:
+                pass
+        page.on("response", _on_response)
+
+        t1 = time.monotonic()
+        try:
+            resp = page.goto(SMAX_URL, wait_until="domcontentloaded",
+                             timeout=PORTAL_TIMEOUT)
+            goto_ms = round((time.monotonic() - t1) * 1000)
+            page.wait_for_timeout(F5_SETTLE_MS)
+            html = page.content()
+            res["page"] = {
+                "status": resp.status if resp else None,
+                "goto_ms": goto_ms,
+                "settle_ms": F5_SETTLE_MS,
+                "total_ms": round((time.monotonic() - t1) * 1000),
+                "final_url": safe_url(page.url),
+                "title": redact(page.title(), 150),
+                "html_len": len(html or ""),
+            }
+        except Exception as e:
+            res["page"] = {"error": f"{type(e).__name__}: {e}"[:200],
+                           "total_ms": round((time.monotonic() - t1) * 1000)}
+            res["verdict"] = "FAIL"
+            res["diagnosis"] = ("timeout" if "Timeout" in type(e).__name__
+                                else "portal_failure")
+            res["f5"] = {"tspd_requests": tspd_seen}
+            return res
+
+        # ---- دليل F5: أسماء الكوكيز بس، من غير أي قيمة ----
+        cookie_names = []
+        try:
+            cookie_names = sorted({str(c.get("name") or "")
+                                   for c in ctx.cookies()})
+        except Exception:
+            pass
+        ts_cookies = [c for c in cookie_names if c.upper().startswith("TS")]
+        res["f5"] = {
+            "tspd_requests": tspd_seen,
+            "cookie_names": cookie_names,
+            "ts_cookies": ts_cookies,
+            "challenge_seen": bool(tspd_seen),
+        }
+
+        # ---- هل صفحة الدخول اترسمت فعلًا؟ (عناصر، مش نص) ----
+        login = {}
+        try:
+            login["password_inputs"] = page.locator(
+                "input[type=password]").count()
+            login["text_inputs"] = page.locator("input[type=text]").count()
+            login["all_inputs"] = page.locator("input").count()
+            login["buttons"] = page.locator(
+                "button, input[type=submit]").count()
+        except Exception as e:
+            login["error"] = f"{type(e).__name__}"[:60]
+        try:
+            low = (html or "").lower()
+            login["marker_service_portal"] = "service portal" in low
+            login["marker_user_name"] = "user name" in low
+            login["marker_log_in"] = "log in" in low
+        except Exception:
+            pass
+        res["login_page"] = login
+
+        rendered = bool(login.get("password_inputs"))
+        res["verdict"] = "PASS" if rendered else "PARTIAL"
+        res["diagnosis"] = ("login_form_rendered" if rendered
+                            else "reached_but_no_login_form")
+        res["memory_mb"]["after"] = container_mem()
+        return res
+
+    except Exception as e:
+        res["verdict"] = "FAIL"
+        res["diagnosis"] = "unknown"
+        res["error"] = f"{type(e).__name__}: {e}"[:200]
+        res["f5"] = {"tspd_requests": tspd_seen}
+        return res
+    finally:
+        for closer in (lambda: browser and browser.close(),
+                       lambda: pw and pw.stop()):
+            try:
+                closer()
+            except Exception:
+                pass
+
+
 def run_probe():
     res = {
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1287,10 +1435,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._send({"verdict": "FAIL", "failure": "unknown",
                             "diagnosis": "unknown",
                             "error": f"{type(e).__name__}: {e}"[:200]}, 500)
+        elif path == "/smax":
+            # فحص وصول لبوابة الشكاوى — نفس حارس /f5، وهدف ثابت في الكود.
+            if PROBE_KEY:
+                ok = any(p == f"key={PROBE_KEY}" for p in query.split("&"))
+                if not ok:
+                    self._send({"ok": False, "error": "unauthorized"}, 401)
+                    return
+            try:
+                self._send(run_smax_probe())
+            except Exception as e:
+                self._send({"verdict": "FAIL", "diagnosis": "unknown",
+                            "error": f"{type(e).__name__}: {e}"[:200]}, 500)
         elif path == "/":
             self._send({"ok": True,
                         "service": "orkestr-f5-test",
                         "usage": "GET /f5" + (" ?key=…" if PROBE_KEY else ""),
+                        "usage_smax": "GET /smax"
+                                      + (" ?key=…" if PROBE_KEY else ""),
                         "diagnosis_values": [
                             "login_form_reached",
                             "keycloak_reachable_oidc_invalid",
