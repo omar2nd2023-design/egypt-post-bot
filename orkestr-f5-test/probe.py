@@ -871,6 +871,14 @@ RENEW_JOIN_TIMEOUT_SEC = 210
 # سقف كلي للدورة الواحدة — أقل من مهلة الانضمام، عشان المنتظرين
 # مايخرجوش بـtimeout والتجديد لسه شغّال
 RENEW_DEADLINE_SEC = 180
+# 🔴 2026-09-06 15:06: دخول واحد فشل بسبب عابر، فالمستخدم شاف «تعذّر تجديد
+#    التوكن» فورًا — مع إن المحاولة اللي بعدها نجحت. الدورة الواحدة بقت
+#    محاولتين كحد أقصى: لو الأولى فشلت وفاضل وقت كافي قبل مهلة الانضمام،
+#    بنستنى شوية ونجرّب تاني في نفس الدورة (المنتظرون بيستنوا نتيجتها).
+RENEW_RETRY_PAUSE_SEC = 5
+RENEW_RETRY_MIN_LEFT_SEC = 75
+# أسباب دايمة — إعادة المحاولة فيها مالهاش معنى
+RENEW_NO_RETRY_REASONS = ("missing_credentials",)
 
 PHONE_SELECTORS = ("#username", "input[name='username']",
                    "input[type='tel']", "input[type='text']")
@@ -1246,11 +1254,25 @@ def renew_token():
             return {**(_renew_state["result"] or {}), "joined": True}
         return {"ok": False, "failure_reason": "join_timeout", "joined": True}
 
-    try:
-        res = _do_renew()
-    except Exception as e:
-        res = {"ok": False,
-               "failure_reason": redact(f"{type(e).__name__}: {e}", 150)}
+    t_cycle = time.monotonic()
+    res = None
+    for attempt in (1, 2):
+        try:
+            res = _do_renew()
+        except Exception as e:
+            res = {"ok": False,
+                   "failure_reason": redact(f"{type(e).__name__}: {e}", 150)}
+        res["attempts"] = attempt
+        if res.get("ok") or attempt == 2:
+            break
+        if res.get("failure_reason") in RENEW_NO_RETRY_REASONS:
+            break
+        left = RENEW_JOIN_TIMEOUT_SEC - (time.monotonic() - t_cycle)
+        if left < RENEW_RETRY_PAUSE_SEC + RENEW_RETRY_MIN_LEFT_SEC:
+            break                      # مفيش وقت لمحاولة كاملة تانية
+        print(f"renew attempt 1 failed ({res.get('failure_reason')}) — "
+              f"retrying in {RENEW_RETRY_PAUSE_SEC}s", flush=True)
+        time.sleep(RENEW_RETRY_PAUSE_SEC)
     with _renew_lock:
         _renew_state["result"] = res
         _renew_state["finished_at"] = time.time()
@@ -1472,6 +1494,10 @@ class Handler(BaseHTTPRequestHandler):
                 "renew_guarded": bool(RENEW_SECRET),
                 "renew_running": _renew_state["running"],
                 "last_renew_ok": last.get("ok"),
+                # سبب آخر فشل (معقّم أصلاً بـredact) وعدد المحاولات — عشان
+                # نعرف إيه اللي حصل من غير ما نحتاج لوجات المنصة
+                "last_renew_reason": last.get("failure_reason"),
+                "last_renew_attempts": last.get("attempts"),
                 "last_renew_age_sec": (
                     round(time.time() - _renew_state["finished_at"])
                     if _renew_state["finished_at"] else None),
