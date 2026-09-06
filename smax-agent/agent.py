@@ -343,7 +343,10 @@ class Agent:
         """الاستعلام هو النبضة: /agent/poll بيسجّل الحالة وبيرجّع مهمة لو فيه."""
         code, j = self._post("/agent/poll", self.payload())
         job = j.get("job") if isinstance(j, dict) else None
-        if job:
+        # 2026-09-06: لو فيه مهمة تانية مستنية في الطابور نبدأها **فورًا** بعد
+        # تسليم النتيجة، من غير تجهيز الأساس (الأساس بيتصلّح في أول المهمة أصلًا).
+        # كان التجهيز (~36 ث) بيتحسب على الشحنة اللي مستنية — شفناه: انتظار 1:16.
+        while job:
             self.mark_active()
             corr = job.get("corr_id", "?")
             log("%s مهمة اتاستلمت: %s" % (corr, job.get("job_id")))
