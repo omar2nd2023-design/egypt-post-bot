@@ -324,6 +324,7 @@ class Agent:
         (filter_button_hidden ثم Locator.click timeout) — مش بسبب الشكوى.
         عطل الواجهة بيتصلّح بإعادة تحميل الشبكة، فبنعيد المحاولة **مرة واحدة**
         بعد إعادة التحميل قبل ما نبلّغ فشل."""
+        import smax_search as S          # زي execute — الاستيراد محلي مش على مستوى الملف
         for attempt in (1, 2):
             try:
                 res = S.search_and_extract(page, bc, request_no=None,
