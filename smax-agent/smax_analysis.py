@@ -197,7 +197,25 @@ def analyze(res, job, log=print):
             request_status="",
             shipment_no=str(job.get("barcode") or ""),
         )
-        issue_type, evidence_log, class_source = classify_with_learning(sources)
+        # 2026-09-06: بوّابة التتبّع في Smax_V11 (entity_gate) — البوت عنده مسار
+        # تتبّع خاص (Worker → Orkestr) مش tracking.py، فبنمرّر أحداث التتبّع
+        # الحيّ بنفسنا لو المصنّف بيقبل `events` (نسخة أقدم = نفس النداء القديم).
+        import inspect
+        events = {}
+        try:
+            evs = track.get("events") or []
+            if evs and job.get("barcode"):
+                events = {str(job["barcode"]).strip().upper(): evs}
+        except Exception:
+            events = {}
+        try:
+            accepts_events = "events" in inspect.signature(classify_with_learning).parameters
+        except Exception:
+            accepts_events = False
+        if accepts_events and events:
+            issue_type, evidence_log, class_source = classify_with_learning(sources, events=events)
+        else:
+            issue_type, evidence_log, class_source = classify_with_learning(sources)
         delay = calculate_delay_days_v11(
             issue_type=issue_type,
             last_status=sources.shipment_last_status,

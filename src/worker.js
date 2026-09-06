@@ -591,6 +591,14 @@ function trackSummary(row, journey) {
     before_last_status: line(recs[1]),
     received_date: received ? (received.EventDateAndTime || '').trim() : '',
     request_date: (row?.r || '').trim(),
+    // 2026-09-06: كل أحداث التتبّع الحيّ (الأحدث الأول زي الـAPI) — الوكيل
+    // بيمرّرها لبوّابة Smax_V11 (entity_gate) عشان تحكم «هل البريد استلم
+    // الشحنة من الجهة» من التتبّع الحقيقي مش من كلام التعليقات.
+    events: recs.slice(0, 60).map((r) => ({
+      status: (r.ItemStatus || '').trim(),
+      time: (r.EventDateAndTime || '').trim(),
+      office: (r.OfficeName || r.Office || '').trim(),
+    })),
   };
   return JSON.stringify(out);
 }
