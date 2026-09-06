@@ -101,13 +101,15 @@ _SECTIONS = [
 
 
 def _sections_for(issue_type):
+    # 2026-09-06 (طلب المدير): «أدلة التأكيد» بتظهر في **كل** التصنيفات —
+    # لو فاضية بتطلع «لا يوجد» لكل مصدر.
     it = str(issue_type or "")
     if "وهمي" in it:
         return ["confirmed", "denial"]
     if "فقد" in it or "سرقة" in it:
-        return ["denial", "loss"]
+        return ["confirmed", "denial", "loss"]
     if "تأخير" in it or "إجراءات" in it or "تعثر" in it:
-        return ["denial", "procedure", "partial"]
+        return ["confirmed", "denial", "procedure", "partial"]
     return [k for k, _ in _SECTIONS]
 
 
