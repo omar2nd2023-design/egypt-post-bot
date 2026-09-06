@@ -634,6 +634,27 @@ def _fields(page):
     }""")
 
 
+_TOOLBAR_WORDS = ("Bold", "Italic", "Underline", "Text Color", "Background Color",
+                  "Insert/Remove Numbered List", "Insert/Remove Bulleted List",
+                  "Format Table", "Format", "Maximize", "Source", "Link", "Image",
+                  "Rich Text Editor,", "Table")
+
+
+def _clean_description(text):
+    """يشيل نص شريط أدوات CKEditor لو اتلمّ مع الوصف (مقيس 2026-09-06):
+    'undefined' · 'Keyboard shortcut Ctrl+B' · أسماء الأزرار، والنص المكرر بعدها."""
+    t = str(text or "")
+    if not t:
+        return ""
+    junk = ("undefined" in t) or ("Keyboard shortcut" in t) or ("Rich Text Editor" in t)
+    if junk:
+        # الوصف الحقيقي هو الجزء اللي قبل أول أثر للشريط
+        t = re.split(r"undefined|Keyboard shortcut|Rich Text Editor", t, 1)[0]
+        for w in _TOOLBAR_WORDS:
+            t = t.replace(w, " ")
+    return re.sub(r"[ \t]+", " ", t).strip()
+
+
 def open_complaint(page, rid):
     """يفتح الشكوى ويستخرج حقول general."""
     page.goto("https://support.degypt.net/saw/Request/%s/general" % rid,
@@ -662,15 +683,27 @@ def open_complaint(page, rid):
                 if n.lower() in k.strip().lower():
                     return v
         return ""
-    desc = g("Description")
+    # 🔴 2026-09-06: حاوية حقل الوصف أحيانًا بتضم **شريط أدوات محرّر النصوص**
+    #    (Bold · Ctrl+B · undefined …) والنص بيتكرر بعده. الأولوية لنص المحرّر
+    #    نفسه (أطول عنصر قابل للتحرير جوه الحاوية)، وبعدها الحقل مع تنضيف.
+    desc = ""
+    try:
+        desc = page.evaluate("""() => {
+          const fc=[...document.querySelectorAll('.field-container')]
+            .find(x=>/^Description/.test(((x.querySelector('.label-text')||{}).innerText||'').trim()));
+          const root = fc || document;
+          let best='';
+          for (const e of root.querySelectorAll('.cke_editable,[contenteditable=true],.cke_wysiwyg_div')) {
+            const t=(e.innerText||'').trim();
+            if (t.length > best.length) best = t;
+          }
+          return best.slice(0, 3000);
+        }""") or ""
+    except Exception:
+        desc = ""
     if not desc:
-        try:
-            desc = page.evaluate("""() => {
-              const e=document.querySelector('.cke_editable,[contenteditable=true]');
-              return e ? (e.innerText||'').trim().slice(0,1500) : '';
-            }""")
-        except Exception:
-            desc = ""
+        desc = g("Description")
+    desc = _clean_description(desc)
     return {
         "id": rid,
         "request_number": g("Request number", "Request num"),
