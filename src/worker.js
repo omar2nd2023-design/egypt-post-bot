@@ -430,15 +430,26 @@ function buildReply(bc, row, journey) {
     L.push(`🌐 <b>رحلة الشحنة</b> — ${recs.length} حالة`);
     if (journey.status) L.push(`   ◀ <b>آخر حالة: ${journey.status}</b>`);
     L.push('');
-    for (const r of recs.slice(0, 15)) {
+    // المدير 2026-09-06: كل الحالات، مش 15 بس. الحد الوحيد هو طول رسالة
+    // تليجرام (4096) — نص التتبّع بيتعدّل في رسالة واحدة، فبنحجز ميزانية
+    // حروف وبنقطع بس لو الرحلة أطول منها (عادة فوق ~30 حالة).
+    const BUDGET = 3200;
+    let used = L.join('\n').length;
+    let shown = 0;
+    for (const r of recs) {
       const when = (r.EventDateAndTime || '').trim();
       const st = (r.ItemStatus || '').trim();
       const loc = [(r.Location || '').trim(), (r.City || '').trim()]
         .filter(Boolean).join(' — ');
-      L.push(`   ${when}`);
-      L.push(`   ${st}${loc ? ` (${loc})` : ''}`);
+      const a = `   ${when}`;
+      const b = `   ${st}${loc ? ` (${loc})` : ''}`;
+      if (used + a.length + b.length + 2 > BUDGET) break;
+      L.push(a);
+      L.push(b);
+      used += a.length + b.length + 2;
+      shown++;
     }
-    if (recs.length > 15) L.push(`   … و${recs.length - 15} حالة أقدم`);
+    if (recs.length > shown) L.push(`   … و${recs.length - shown} حالة أقدم (حد طول الرسالة)`);
   }
   return L.join('\n');
 }
@@ -597,7 +608,7 @@ function trackSummary(row, journey) {
     events: recs.slice(0, 60).map((r) => ({
       status: (r.ItemStatus || '').trim(),
       time: (r.EventDateAndTime || '').trim(),
-      office: (r.OfficeName || r.Office || '').trim(),
+      office: [(r.Location || '').trim(), (r.City || '').trim()].filter(Boolean).join(' — '),
     })),
   };
   return JSON.stringify(out);
