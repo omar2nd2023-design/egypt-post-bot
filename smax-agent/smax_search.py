@@ -779,6 +779,30 @@ def extract_discussions(page, rid):
     if "Submitted by" not in body:
         return []
     parts = body.split("Submitted by")
+    # 🔴 2026-09-06: تعليق فيه **صورة بس** (من غير نص) كان بيطلع فاضي. بنفحص
+    #    في الـDOM لكل تذييل "Submitted by" (بنفس ترتيب الصفحة) هل حاويته فيها
+    #    صورة مش أفاتار — عشان نكتب «تعليق فيه صورة» بدل نص فاضي.
+    try:
+        imgs = page.evaluate("""() => {
+          const res = [];
+          const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          let n;
+          while ((n = w.nextNode())) {
+            if (!/Submitted by/.test(n.nodeValue || '')) continue;
+            let e = n.parentElement, found = false;
+            for (let k = 0; k < 8 && e; k++, e = e.parentElement) {
+              const pics = [...e.querySelectorAll('img')].filter(im =>
+                !/avatar|user|profile|icon|logo/i.test((im.className||'') + ' ' + (im.src||''))
+                && (im.naturalWidth > 60 || im.width > 60 || !im.width));
+              if (pics.length) { found = true; break; }
+              if ((e.innerText || '').split('Submitted by').length > 2) break;
+            }
+            res.push(found);
+          }
+          return res;
+        }""") or []
+    except Exception:
+        imgs = []
     out = []
     SYS = re.compile(
         r"automatically generated|request has been assigned|loading discussions"
@@ -822,9 +846,16 @@ def extract_discussions(page, rid):
         #   (المسافات والحروف بتختلف — بنمسك أي "… to Agent - X - " في الأول)
         text = re.sub(r"^\s*[A-Za-z ]{0,40}?\bto\s+Agent\s*-\s*(INTERNAL|PUBLIC)\s*-\s*",
                       "", text, flags=re.I).strip()
+        has_img = bool(imgs[i]) if i < len(imgs) else False
+        if not text:
+            # تعليق من غير نص: صورة (مقيس 2026-09-06) أو فاضي فعلًا
+            text = "📷 تعليق فيه صورة فقط (من غير نص)" if has_img else "(تعليق من غير نص)"
+        elif has_img:
+            text += "\n📷 (التعليق فيه صورة كمان)"
         out.append({"author": re.sub(r"\s+", " ", author),
                     "when": when,
-                    "text": text[:1500]})
+                    "text": text[:1500],
+                    "has_image": has_img})
     return out
 
 # ------------------------------------------------------------ سلّم البحث

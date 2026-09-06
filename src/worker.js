@@ -756,20 +756,32 @@ function renderSmax(res) {
     } else {
       L.push('   📨 رد مدير المشروع: غير معروف');
     }
-    // الأربعة بيظهروا دايمًا — الفاضي «مافيش» (المستخدم 2026-09-06)
-    const ev = (arr, icon, title) => {
-      if (!Array.isArray(arr) || !arr.length) { L.push(`   ${icon} <b>${title}</b>: مافيش`); return; }
+    // الأربعة بيظهروا دايمًا — الفاضي «مافيش». الأدلة مجمّعة بالمصدر: المصدر
+    // عنوان وتحته أدلته، بترتيب مصادر ثابت زي شاشة Smax_V11 (المستخدم 2026-09-06)
+    const ORDER_ALL = ['Shipment Last Status', 'Last Comment', 'Discussion', 'Description'];
+    const ORDER_DENIAL = ['Last Comment', 'Discussion', 'Description'];
+    const evBy = (by, legacy, icon, title, order) => {
+      let map = by && typeof by === 'object' ? by : null;
+      if (!map && Array.isArray(legacy)) {          // توافق مع نتائج قديمة
+        map = {};
+        for (const [p, s] of legacy) for (const src of (s || [])) (map[src] = map[src] || []).push(p);
+      }
+      const srcs = order.filter((s) => map && Array.isArray(map[s]) && map[s].length);
+      for (const s of Object.keys(map || {})) if (!order.includes(s) && map[s].length) srcs.push(s);
+      if (!srcs.length) { L.push(`   ${icon} <b>${title}</b>: مافيش`); return; }
       L.push(`   ${icon} <b>${title}</b>`);
-      for (const [p, s] of arr) {
-        const srcs = (s || []).map((x) => SRC[x] || x).join('، ');
-        L.push(`      • ${esc(String(p).slice(0, 180))}${srcs ? ` <i>(${esc(srcs)})</i>` : ''}`);
+      for (const s of srcs) {
+        L.push(`      <u>${esc(SRC[s] || s)}</u>`);
+        for (const p of map[s].slice(0, 3)) L.push(`      • ${esc(String(p).slice(0, 180))}`);
       }
     };
-    ev(an.confirm, '✅', 'أدلة التأكيد');
-    ev(an.denial, '❌', 'أدلة النفي');
-    ev(an.procedure, '🛠', 'أدلة الإجراءات');
-    ev(an.partial, '⏳', 'أدلة التعثر/التأخير');
-    if (Array.isArray(an.loss) && an.loss.length) ev(an.loss, '📦', 'أدلة الفقد');
+    evBy(an.confirm_by, an.confirm, '✅', 'أدلة التأكيد', ORDER_ALL);
+    evBy(an.denial_by, an.denial, '❌', 'أدلة النفي', ORDER_DENIAL);
+    evBy(an.procedure_by, an.procedure, '🛠', 'أدلة الإجراءات', ORDER_ALL);
+    evBy(an.partial_by, an.partial, '⏳', 'أدلة التعثر/التأخير', ORDER_ALL);
+    if ((an.loss_by && Object.keys(an.loss_by).length) || (Array.isArray(an.loss) && an.loss.length)) {
+      evBy(an.loss_by, an.loss, '📦', 'أدلة الفقد', ORDER_ALL);
+    }
   }
   const lc = res.last_comment;
   if (lc) {

@@ -50,6 +50,20 @@ def _top(bucket, n=3):
     return items[:n]
 
 
+def _by_source(bucket, n=3, maxlen=200):
+    """{phrase: set(sources)} → {source: [أول n عبارة]} بأسماء مصادر Smax_V11."""
+    out = {}
+    for phrase, srcs in (bucket or {}).items():
+        p = str(phrase).strip()[:maxlen]
+        if not p:
+            continue
+        for s in (srcs or ()):
+            lst = out.setdefault(str(s), [])
+            if p not in lst and len(lst) < n:
+                lst.append(p)
+    return out
+
+
 def analyze(res, job, log=print):
     """res = نتيجة search_and_extract (لقيت) · job = المهمة من الـWorker (فيها track)."""
     try:
@@ -99,6 +113,13 @@ def analyze(res, job, log=print):
             "procedure": _top(ev.get("procedure")),
             "partial": _top(ev.get("partial")),
             "loss": _top(ev.get("loss")),
+            # مجمّعة بالمصدر (المستخدم 2026-09-06): المصدر عنوان وتحته أدلته —
+            # زي شاشة Smax_V11 بالظبط، وبترتيب مصادر ثابت في الـWorker.
+            "confirm_by": _by_source(ev.get("confirmed")),
+            "denial_by": _by_source(ev.get("denial")),
+            "procedure_by": _by_source(ev.get("procedure")),
+            "partial_by": _by_source(ev.get("partial")),
+            "loss_by": _by_source(ev.get("loss")),
             "reply": _reply_from_comments(comments) or _reply(res.get("id"), log),
         }
         return out
