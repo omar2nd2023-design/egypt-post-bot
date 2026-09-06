@@ -753,7 +753,8 @@ function renderSmax(res) {
     L.push('━━━━━━━━━━━━━━━━━━━━');
     L.push('🧠 <b>تحليل الشكوى</b>');
     if (an.issue_type) {
-      const src = an.class_source && an.class_source !== 'تلقائي' ? ` <i>(${esc(an.class_source)})</i>` : '';
+      // المدير 2026-09-06: التصنيف لوحده من غير مصدره بين قوسين
+    const src = '';
       L.push(`   🏷 التصنيف: <b>${esc(an.issue_type)}</b>${src}`);
     }
     const basis = an.delay_basis === 'received' ? ' <i>(من استلام الجهة)</i>'
