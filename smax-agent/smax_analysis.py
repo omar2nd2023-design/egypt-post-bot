@@ -115,13 +115,16 @@ def _reply_from_comments(comments):
     2026-09-06: تاريخ سجل الأداة مش هو تاريخ الرد الفعلي). بيرجّع آخر تعليق
     باسمه مع تاريخه ورقمه في القائمة، أو None لو مافيش."""
     key = [p.strip().lower() for p in MANAGER_NAME.replace(",", " ").split() if p.strip()]
-    hit = None
+    items = []
     for i, c in enumerate(comments or [], start=1):
         author = str(c.get("author") or "").lower()
         if key and all(k in author for k in key):
-            hit = {"state": "sent", "when": str(c.get("when") or ""), "index": i,
-                   "source": "discussions"}
-    return hit
+            items.append({"when": str(c.get("when") or ""), "index": i})
+    if not items:
+        return None
+    # كل تعليقاته بترتيب الصفحة (الأقدم → الأحدث) — المستخدم 2026-09-06
+    return {"state": "sent", "source": "discussions", "count": len(items),
+            "items": items, "when": items[-1]["when"], "index": items[-1]["index"]}
 
 
 def _reply(complaint_id, log=print):

@@ -737,8 +737,16 @@ function renderSmax(res) {
     L.push(`   ⏱ التأخير: <b>${Number(an.delay_days) || 0} يوم</b>${basis}`);
     const rp = an.reply || {};
     if (rp.state === 'sent' && rp.source === 'discussions') {
-      // المصدر الأساسي: تعليق مدير المشروع نفسه في المناقشات (تاريخه ورقمه)
-      L.push(`   📨 رد مدير المشروع: ✅ فيها رد — ${esc(rp.when)}${rp.index ? ` <i>(تعليق رقم ${rp.index})</i>` : ''}`);
+      // المصدر الأساسي: تعليقات مدير المشروع نفسه في المناقشات — كلها،
+      // من الأقدم للأحدث مع تاريخ ورقم كل واحد (المستخدم 2026-09-06)
+      const items = Array.isArray(rp.items) && rp.items.length ? rp.items : [{ when: rp.when, index: rp.index }];
+      if (items.length === 1) {
+        L.push(`   📨 رد مدير المشروع: ✅ فيها رد — ${esc(items[0].when)}${items[0].index ? ` <i>(تعليق رقم ${items[0].index})</i>` : ''}`);
+      } else {
+        const ORD = ['الأول', 'التاني', 'التالت', 'الرابع', 'الخامس', 'السادس'];
+        L.push(`   📨 رد مدير المشروع: ✅ فيها ${items.length} ردود`);
+        items.forEach((it, i) => L.push(`      ${ORD[i] || (i + 1)}: ${esc(it.when)}${it.index ? ` <i>(تعليق رقم ${it.index})</i>` : ''}`));
+      }
     } else if (rp.state === 'sent') {
       L.push(`   📨 رد مدير المشروع: ✅ مسجّل في الأداة بتاريخ ${esc(rp.when)} <i>(مش لاقي تعليقك في المناقشات)</i>`);
     } else if (rp.state === 'drafted') {
