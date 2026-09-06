@@ -364,7 +364,17 @@ class Agent:
                 self._post("/agent/result", body)
             except Exception as e:
                 log("%s تعذّر تسليم النتيجة: %s" % (corr, type(e).__name__))
-            # تحسين 2026-09-06: نجهّز الشبكة والأساس للمهمة الجاية **بعد**
+            # 🔴 استعلام تاني فورًا: لو فيه مهمة مستنية نبدأها على طول.
+            #    (خطأ 14:51 — الحلقة كانت بتعيد نفس المهمة بلا نهاية لأن `job`
+            #    ماكانش بيتجدّد. المهمة اللي في تليجرام فضلت مستنية 20 دقيقة.)
+            try:
+                code, j = self._post("/agent/poll", self.payload())
+            except Exception:
+                code, j = 0, {}
+            job = j.get("job") if isinstance(j, dict) else None
+            if job:
+                continue
+            # مافيش مهمة مستنية: نجهّز الشبكة والأساس للمهمة الجاية **بعد**
             # ما النتيجة اتسلّمت — التكلفة دي كانت على حساب وقت المستخدم.
             try:
                 if self._page is not None:

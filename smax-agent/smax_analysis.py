@@ -18,16 +18,51 @@ from pathlib import Path
 SMAX_V11 = Path(os.environ.get("SMAX_V11_DIR", r"E:\Projects\ComplaintsBot\Smax_V11"))
 
 _loaded = False
+_learned_mtime = None
+_LEARNED_FILES = ("learned_corrections.json", "learned_history.json")
+
+
+def _learned_stamp():
+    st = []
+    for n in _LEARNED_FILES:
+        try:
+            st.append(os.path.getmtime(SMAX_V11 / n))
+        except Exception:
+            st.append(0)
+    return tuple(st)
 
 
 def _load():
-    global _loaded
-    if _loaded:
-        return True
+    """يحمّل وحدات Smax_V11 — و**يعيد تحميلها** لو ملفات التعلّم اتغيّرت.
+
+    🔴 2026-09-06: reason_evidence/classifier بيقروا learned_corrections.json مرة
+       عند الاستيراد. الوكيل عملية طويلة العمر، فأي تصحيح من شاشة الأداة كان
+       مش هيوصل للبوت إلا بإعادة تشغيل. دلوقتي: قبل كل تحليل بنقارن وقت تعديل
+       ملفات التعلّم — لو اتغيّرت بنعيد استيراد الوحدات (learned → reason_evidence
+       → classifier → description_pro) فالتصحيح بيتطبّق **فورًا** في البوت والبالون.
+    """
+    global _loaded, _learned_mtime
     if not (SMAX_V11 / "classifier.py").exists():
         return False
     if str(SMAX_V11) not in sys.path:
         sys.path.insert(0, str(SMAX_V11))
+    stamp = _learned_stamp()
+    if _loaded and stamp != _learned_mtime:
+        import importlib
+        for name in ("learned", "reason_evidence", "classifier", "description_pro"):
+            mod = sys.modules.get(name)
+            if mod is not None:
+                try:
+                    importlib.reload(mod)
+                except Exception:
+                    pass
+        try:
+            import reason_evidence as _re
+            if hasattr(_re, "reload_rejected"):
+                _re.reload_rejected()
+        except Exception:
+            pass
+    _learned_mtime = stamp
     _loaded = True
     return True
 

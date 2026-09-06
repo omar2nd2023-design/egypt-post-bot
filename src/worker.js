@@ -354,6 +354,8 @@ async function renderResult(env, chatId, msgId, bc, journey) {
     }
   } catch (e) { smaxTail = ''; }
 
+  // مهام البالون: مافيش رسالة تليجرام — النص اتحفظ في المهمة والبالون بيقراه من GET /bubble
+  if (String(chatId) === 'bubble') return;
   if (smaxTail) {
     try { await sendSmaxParts(env, chatId, msgId, text + smaxTail); return; }
     catch (e) { /* نقع على التعديل العادي تحت */ }
@@ -1210,6 +1212,94 @@ export default {
       }
     }
 
+    // ---- البالون على الكمبيوتر (المرحلة 4، المستخدم 2026-09-06) ----
+    // نفس نص البوت بالحرف: التتبّع من نفس الكود (buildReply) + الشكوى من نفس
+    // الوكيل والطابور + نفس العرض (renderSmax/timingLine). البالون مالوش أي
+    // كود عرض خاص — أي تعديل في البوت بيظهر فيه تلقائيًا.
+    //   POST /bubble {barcode}     -> {job_id, text}   (التتبّع + «جاري البحث»)
+    //   GET  /bubble?job_id=...    -> {status, text}   (لما تخلص: النص الكامل)
+    // محمي بسر الوكيل (نفس الجهاز). مافيش تليجرام هنا خالص.
+    if (url.pathname === '/bubble' && request.method === 'POST') {
+      const auth = request.headers.get('Authorization') || '';
+      if (!env.AGENT_SECRET || auth !== `Bearer ${env.AGENT_SECRET}`) {
+        return new Response('unauthorized', { status: 401 });
+      }
+      let body; try { body = await request.json(); } catch { body = null; }
+      const m = String(body?.barcode || '').toUpperCase().match(BC_RE);
+      if (!m) return Response.json({ ok: false, error: 'bad_barcode' }, { status: 400 });
+      const bc = m[0];
+      const sentAt = Math.floor(Date.now() / 1000);
+      let row = null;
+      try {
+        const rows = await tursoQuery(env, 'SELECT * FROM bc WHERE code = ?', [bc]);
+        row = rows[0] || null;
+      } catch (e) { /* الفهرس مش متاح — نكمّل بالتتبّع الحيّ */ }
+      // نفس مسار تليجرام: لو البوابة طوّلت عن الميزانية بتكمّل عن طريق /finish
+      // (deliverTo) وrenderResult بيحفظ نص التتبّع في المهمة — والبالون بيقراه.
+      const msgId = `b${sentAt}${Math.random().toString(36).slice(2, 7)}`;
+      const deliverTo = { chat_id: 'bubble', message_id: msgId };
+      let journey = null;
+      try {
+        const token = await Promise.race([
+          getToken(env, ctx),
+          new Promise((r) => setTimeout(() => r(null), GETTOKEN_MAX_WAIT_MS)),
+        ]);
+        journey = await fetchJourney(bc, token, env, TRACK_BUDGET_MS, deliverTo);
+        if (journey.err === 'expired') {
+          const fresh = await renewNow(env, () => {});
+          journey = fresh ? await fetchJourney(bc, fresh, env, TRACK_BUDGET_MS, deliverTo)
+                          : { err: 'refresh-failed' };
+          if (journey.err === 'expired') journey = { err: 'refresh-failed' };
+        }
+      } catch (e) { journey = { err: String(e).slice(0, 60) }; }
+      const pending = journey?.err === 'timeout';
+      const trackingText = pending
+        ? `🔍 <b>${bc}</b>\n━━━━━━━━━━━━━━━━━━━━\n⏳ التتبّع الحيّ لسه بيتجمّع من البوابة...`
+        : buildReply(bc, row, journey);
+      let jobId = null;
+      try {
+        jobId = await createSmaxJob(env, {
+          corr_id: newCorrId(), chat_id: 'bubble', message_id: msgId, barcode: bc,
+          national_id: row?.nid || '', tracking_text: pending ? '' : trackingText,
+          sent_at: sentAt, track: trackSummary(row, pending ? null : journey),
+        });
+      } catch (e) { jobId = null; }
+      const tail = jobId ? '\n━━━━━━━━━━━━━━━━━━━━\n🔎 جاري البحث عن الشكوى في SMAX...'
+                         : '\n━━━━━━━━━━━━━━━━━━━━\n📋 <b>الشكوى</b>: الطابور مش متاح دلوقتي.';
+      return Response.json({ ok: true, job_id: jobId, text: trackingText + tail });
+    }
+    if (url.pathname === '/bubble' && request.method === 'GET') {
+      const auth = request.headers.get('Authorization') || '';
+      if (!env.AGENT_SECRET || auth !== `Bearer ${env.AGENT_SECRET}`) {
+        return new Response('unauthorized', { status: 401 });
+      }
+      const jid = url.searchParams.get('job_id') || '';
+      if (!jid || jid.length > 80) return new Response('bad job_id', { status: 400 });
+      let rows;
+      try {
+        rows = await tursoQuery(env,
+          `SELECT status, tracking_text, result, sent_at, created_at, claimed_at,
+                  completed_at, tracked_at, barcode FROM smax_jobs WHERE job_id=?`, [jid]);
+      } catch (e) { return Response.json({ ok: false, error: 'store_failed' }, { status: 503 }); }
+      if (!rows.length) return new Response('not found', { status: 404 });
+      const j = rows[0];
+      const nowSec = Math.floor(Date.now() / 1000);
+      // نص التتبّع فاضي = البوابة لسه ماكمّلتش عن طريق /finish
+      const head = String(j.tracking_text || '')
+        || `🔍 <b>${esc(j.barcode || '')}</b>\n━━━━━━━━━━━━━━━━━━━━\n⏳ التتبّع الحيّ لسه بيتجمّع من البوابة...`;
+      let tail = '';
+      if (j.status === 'SUCCESS' && j.result) {
+        let res = null; try { res = JSON.parse(j.result); } catch {}
+        tail = (res ? renderSmax(res) : '') + timingLine(j, Number(j.completed_at) || nowSec);
+      } else if (j.status === 'FAILED' || j.status === 'TIMEOUT') {
+        tail = SMAX_FAIL_TAIL;
+      } else {
+        tail = '\n━━━━━━━━━━━━━━━━━━━━\n🔎 جاري البحث عن الشكوى في SMAX...';
+      }
+      return Response.json({ ok: true, status: j.status, tracking_ready: !!j.tracking_text,
+                             text: head + tail });
+    }
+
     // ---- الوكيل بيسلّم النتيجة ----
     if (url.pathname === '/agent/result' && request.method === 'POST') {
       const auth = request.headers.get('Authorization') || '';
@@ -1255,7 +1345,8 @@ export default {
       // من غير نص تتبّع = مسار الـtimeout و/finish لسه ماوصلش: النتيجة
       // محفوظة في المهمة، وrenderResult هي اللي هتكتبها في **نفس الرسالة**
       // لما التتبّع يوصل (قرار المستخدم: رسالة واحدة، مش رد منفصل).
-      if (base) {
+      // مهام البالون (chat_id='bubble') مش بتروح لتليجرام — البالون بيقراها من GET /bubble
+      if (base && r0.chat_id !== 'bubble') {
         ctx.waitUntil(sendSmaxParts(env, r0.chat_id, r0.message_id, base + tail)
           .catch(() => {}));
       }
