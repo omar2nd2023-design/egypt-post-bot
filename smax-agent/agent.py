@@ -300,8 +300,7 @@ class Agent:
                 except Exception:
                     pass
             self.smax_status = "ready"
-            res = S.search_and_extract(page, bc, request_no=None,
-                                       national_id=nid, log=log)
+            res = self._search_with_retry(page, bc, nid, log)
             # المرحلة 3: تحليل الشكوى بأدوات Smax_V11 (معزول — فشله مابيأثرش)
             if isinstance(res, dict) and res.get("found"):
                 try:
@@ -319,6 +318,31 @@ class Agent:
             self.smax_status = "error"
             self._close_browser()
             return False, redact("%s: %s" % (type(e).__name__, e))[:200]
+
+    def _search_with_retry(self, page, bc, nid, log):
+        """2026-09-06 18:44: «تعذّر البحث» وصلت للمستخدم بسبب عطل واجهة SMAX
+        (filter_button_hidden ثم Locator.click timeout) — مش بسبب الشكوى.
+        عطل الواجهة بيتصلّح بإعادة تحميل الشبكة، فبنعيد المحاولة **مرة واحدة**
+        بعد إعادة التحميل قبل ما نبلّغ فشل."""
+        for attempt in (1, 2):
+            try:
+                res = S.search_and_extract(page, bc, request_no=None,
+                                           national_id=nid, log=log)
+                infra = isinstance(res, dict) and not res.get("found") and bool(
+                    res.get("error") or res.get("tried") == "baseline_failed")
+                if not infra or attempt == 2:
+                    return res
+                log("   البحث وقع في عطل واجهة (%s) — إعادة تحميل ومحاولة تانية"
+                    % (res.get("error") or res.get("tried")))
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                log("   البحث رمى %s — إعادة تحميل ومحاولة تانية" % type(e).__name__)
+            try:
+                page.goto(S.GRID_URL, wait_until="domcontentloaded", timeout=60000)
+                S._wait_grid_or_login(page)
+            except Exception:
+                pass
 
     def payload(self):
         return {
