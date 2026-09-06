@@ -101,7 +101,19 @@ def analyze(res, job, log=print):
             request_date=track.get("request_date") or None,
         )
         ev = extract_evidence(sources) or {}
+        # نفس عرض Smax_V11 بالحرف (المستخدم 2026-09-06: «خلي كل حاجة ترجع زي
+        # smax v11»): build_review_evidence = 5 أقسام × كل مصدر بترتيب SOURCE_ORDER
+        # وكل الأدلة من غير حد، و«لا يوجد» للفاضي. وسبب التصنيف من build_reason_v11.
+        review_text, reason = "", ""
+        try:
+            from reason_evidence import build_review_evidence, build_reason_v11
+            review_text = str(build_review_evidence(sources) or "")
+            reason = str(build_reason_v11(sources, issue_type) or "")
+        except Exception as e:
+            log("عرض الأدلة (Smax_V11) فشل: %s" % type(e).__name__)
         out = {
+            "review_text": review_text[:6000],
+            "reason": reason[:300],
             "issue_type": str(issue_type or ""),
             "class_source": str(class_source or ""),
             "delay_days": int(delay or 0),

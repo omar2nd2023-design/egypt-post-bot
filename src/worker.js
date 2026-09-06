@@ -775,12 +775,31 @@ function renderSmax(res) {
         for (const p of map[s].slice(0, 3)) L.push(`      • ${esc(String(p).slice(0, 180))}`);
       }
     };
-    evBy(an.confirm_by, an.confirm, '✅', 'أدلة التأكيد', ORDER_ALL);
-    evBy(an.denial_by, an.denial, '❌', 'أدلة النفي', ORDER_DENIAL);
-    evBy(an.procedure_by, an.procedure, '🛠', 'أدلة الإجراءات', ORDER_ALL);
-    evBy(an.partial_by, an.partial, '⏳', 'أدلة التعثر/التأخير', ORDER_ALL);
-    if ((an.loss_by && Object.keys(an.loss_by).length) || (Array.isArray(an.loss) && an.loss.length)) {
-      evBy(an.loss_by, an.loss, '📦', 'أدلة الفقد', ORDER_ALL);
+    if (an.reason) L.push(`   💡 <i>${esc(an.reason)}</i>`);
+    if (an.review_text) {
+      // نص عرض Smax_V11 نفسه (build_review_evidence) — بالحرف، مع تنسيق خفيف:
+      // عناوين الأقسام عريضة، وأسماء المصادر بالعربي بخط تحته خط، والأدلة كنقاط.
+      for (const raw of String(an.review_text).split('\n')) {
+        const ln = raw.trimEnd();
+        if (!ln.trim()) { L.push(''); continue; }
+        if (/^[✅❌⚠️📄📦]/.test(ln)) { L.push(`   <b>${esc(ln.replace(/:$/, ''))}</b>`); continue; }
+        const m = ln.match(/^([A-Za-z][A-Za-z ]+):\s*(.*)$/);
+        if (m) {
+          const name = m[1].trim();   // أسماء المصادر بالإنجليزي زي Smax_V11 بالظبط
+          L.push(m[2] ? `      <u>${esc(name)}</u>: ${esc(m[2])}` : `      <u>${esc(name)}</u>`);
+          continue;
+        }
+        if (ln.startsWith('- ')) { L.push(`      • ${esc(ln.slice(2).slice(0, 220))}`); continue; }
+        L.push(`      ${esc(ln)}`);
+      }
+    } else {
+      evBy(an.confirm_by, an.confirm, '✅', 'أدلة التأكيد', ORDER_ALL);
+      evBy(an.denial_by, an.denial, '❌', 'أدلة النفي', ORDER_DENIAL);
+      evBy(an.procedure_by, an.procedure, '🛠', 'أدلة الإجراءات', ORDER_ALL);
+      evBy(an.partial_by, an.partial, '⏳', 'أدلة التعثر/التأخير', ORDER_ALL);
+      if ((an.loss_by && Object.keys(an.loss_by).length) || (Array.isArray(an.loss) && an.loss.length)) {
+        evBy(an.loss_by, an.loss, '📦', 'أدلة الفقد', ORDER_ALL);
+      }
     }
   }
   const lc = res.last_comment;
