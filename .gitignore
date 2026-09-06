@@ -1,0 +1,9 @@
+smax-agent/agent.env
+smax-agent/agent_id.txt
+smax-agent/agent.log
+__pycache__/
+.wrangler/
+node_modules/
+package-lock.json
+smax-agent/smax_session.json
+smax-agent/*.json
