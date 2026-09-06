@@ -338,9 +338,10 @@ async function renderResult(env, chatId, msgId, bc, journey) {
       await tursoQuery(env,
         `UPDATE smax_jobs SET tracking_text=?,
                 tracked_at=CASE WHEN CAST(tracked_at AS INTEGER) > 0
-                                THEN tracked_at ELSE ? END
+                                THEN tracked_at ELSE ? END,
+                track=?
          WHERE job_id=? AND (tracking_text IS NULL OR tracking_text='')`,
-        [text, nowSec, jid]);
+        [text, nowSec, trackSummary(row, journey), jid]);
       const j = { ...jobs[0], tracked_at: Number(jobs[0].tracked_at) || nowSec };
       if (j.status === 'SUCCESS' && j.result) {
         let res = null; try { res = JSON.parse(j.result); } catch {}
@@ -546,7 +547,9 @@ async function upsertAgent(env, a, nowSec) {
  *    expires_at (مهلة نهائية) و attempts (سقف محاولات).
  */
 const JOB_LEASE_SEC = 180;        // الوكيل لازم يخلص فيها أو المهمة ترجع
-const JOB_EXPIRY_SEC = 3600;      // ساعة — بعدها TIMEOUT نهائي
+// 12 ساعة (كانت ساعة): لو الجهاز مقفول والمستخدم بعت الصبح، المهمة تستنى لحد
+// ما الوكيل يقوم مع تسجيل الدخول بدل ما تنتهي بـ«تعذّر البحث» (المستخدم 2026-09-06).
+const JOB_EXPIRY_SEC = 12 * 3600;      // ساعة — بعدها TIMEOUT نهائي
 const JOB_MAX_ATTEMPTS = 3;
 
 function newCorrId() {
@@ -563,15 +566,31 @@ async function createSmaxJob(env, j) {
   await tursoQuery(env,
     `INSERT INTO smax_jobs
        (job_id, corr_id, chat_id, message_id, barcode, national_id,
-        status, attempts, created_at, expires_at, tracking_text, sent_at, tracked_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?, ?, ?)
+        status, attempts, created_at, expires_at, tracking_text, sent_at, tracked_at, track)
+     VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(job_id) DO NOTHING`,
     [jobId, j.corr_id, String(j.chat_id), String(j.message_id), j.barcode,
      j.national_id || '', now, now + JOB_EXPIRY_SEC, j.tracking_text || '',
      // ⚠️ tursoQuery بيبعت الوسائط كنص — null بيتحوّل لكلمة "null". بنستخدم 0
      //    كـ«لسه» وrenderResult بيملاه لما التتبّع يوصل.
-     j.sent_at || now, j.tracking_text ? now : 0]);
+     j.sent_at || now, j.tracking_text ? now : 0, j.track || '']);
   return jobId;
+}
+
+/** ملخص التتبّع اللي محتاجه تحليل الشكوى على الوكيل (المرحلة 3):
+ *  آخر حالة وقبل الأخيرة (بتاريخهم) · تاريخ استلام الشحنة من الجهة · تاريخ الطلب.
+ *  بيتخزّن كـJSON في smax_jobs.track — من غير أي بيانات شخصية. */
+function trackSummary(row, journey) {
+  const recs = journey?.records || [];
+  const line = (r) => r ? `${(r.ItemStatus || '').trim()} ${(r.EventDateAndTime || '').trim()}`.trim() : '';
+  const received = recs.find((r) => /استلام الشحن[هة] من الجه[هة]/.test(r.ItemStatus || ''));
+  const out = {
+    last_status: line(recs[0]),
+    before_last_status: line(recs[1]),
+    received_date: received ? (received.EventDateAndTime || '').trim() : '',
+    request_date: (row?.r || '').trim(),
+  };
+  return JSON.stringify(out);
 }
 
 function esc(s) {
@@ -696,6 +715,43 @@ function renderSmax(res) {
   if (res.creation_time) L.push(`   2️⃣ تاريخ الإنشاء: ${esc(res.creation_time)}`);
   if (res.assignment_group) L.push(`   3️⃣ الجهة: ${esc(res.assignment_group)}`);
   if (res.found_by) L.push(`   <i>اتلقت بـ${esc(res.found_by)}</i>`);
+
+  // ---- المرحلة 3: كارت التحليل (المستخدم 2026-09-06) ----
+  // التصنيف · التأخير · رد مدير المشروع · أدلة التأكيد والنفي — بيتحسب على
+  // الوكيل بأدوات Smax_V11. لو مش موجود (فشل/مش متاح) الكارت مابيظهرش.
+  const an = res.analysis;
+  if (an && typeof an === 'object') {
+    const SRC = { Discussion: 'المناقشات', Description: 'الوصف', 'Last Comment': 'آخر تعليق',
+                  'Shipment Last Status': 'آخر حالة شحنة', 'Before Last Status': 'الحالة قبل الأخيرة' };
+    L.push('');
+    L.push('━━━━━━━━━━━━━━━━━━━━');
+    L.push('🧠 <b>تحليل الشكوى</b>');
+    if (an.issue_type) {
+      const src = an.class_source && an.class_source !== 'تلقائي' ? ` <i>(${esc(an.class_source)})</i>` : '';
+      L.push(`   🏷 التصنيف: <b>${esc(an.issue_type)}</b>${src}`);
+    }
+    const basis = an.delay_basis === 'received' ? ' <i>(من استلام الجهة)</i>'
+      : an.delay_basis === 'request' ? ' <i>(من تاريخ الطلب)</i>' : '';
+    L.push(`   ⏱ التأخير: <b>${Number(an.delay_days) || 0} يوم</b>${basis}`);
+    const rp = an.reply || {};
+    L.push(rp.state === 'sent' ? `   📨 رد مدير المشروع: ✅ فيها رد — بتاريخ ${esc(rp.when)}`
+      : rp.state === 'drafted' ? '   📨 رد مدير المشروع: ✎ فيه رد متكتوب — لسه مااتبعتش'
+      : rp.state === 'none' ? '   📨 رد مدير المشروع: ❌ مافيش رد'
+      : '   📨 رد مدير المشروع: غير معروف');
+    const ev = (arr, icon, title) => {
+      if (!Array.isArray(arr) || !arr.length) return;
+      L.push(`   ${icon} <b>${title}</b>`);
+      for (const [p, s] of arr) {
+        const srcs = (s || []).map((x) => SRC[x] || x).join('، ');
+        L.push(`      • ${esc(String(p).slice(0, 180))}${srcs ? ` <i>(${esc(srcs)})</i>` : ''}`);
+      }
+    };
+    ev(an.confirm, '✅', 'أدلة التأكيد');
+    ev(an.denial, '❌', 'أدلة النفي');
+    if (!(an.confirm || []).length && !(an.denial || []).length) {
+      L.push('   <i>مافيش عبارات تأكيد أو نفي واضحة</i>');
+    }
+  }
   const lc = res.last_comment;
   if (lc) {
     L.push('');
@@ -876,6 +932,7 @@ async function handleUpdate(env, update, ctx) {
         await createSmaxJob(env, {
           corr_id: newCorrId(), chat_id: chatId, message_id: msgId, barcode: bc,
           national_id: row?.nid || '', tracking_text: '', sent_at: sentAt,
+          track: trackSummary(row, null),   // التتبّع الحي بيتكمّل في renderResult
         });
         waitTxt += '\n🔎 وجاري البحث عن الشكوى في SMAX...';
       } catch (e) { /* الطابور مش متاح — التتبّع شغّال زي ما هو */ }
@@ -896,6 +953,7 @@ async function handleUpdate(env, update, ctx) {
       await createSmaxJob(env, {
         corr_id: corr, chat_id: chatId, message_id: msgId, barcode: bc,
         national_id: row?.nid || '', tracking_text: trackingText, sent_at: sentAt,
+        track: trackSummary(row, journey),
       });
       await edit(trackingText
         + '\n━━━━━━━━━━━━━━━━━━━━\n🔎 جاري البحث عن الشكوى في SMAX...');
@@ -1084,7 +1142,7 @@ export default {
            WHERE job_id=? AND status='PENDING'`,
           [now, now + JOB_LEASE_SEC, a.agent_id, jid]);
         const got = await tursoQuery(env,
-          `SELECT job_id, corr_id, barcode, national_id, attempts
+          `SELECT job_id, corr_id, barcode, national_id, attempts, track
            FROM smax_jobs WHERE job_id=? AND agent_id=? AND status='CLAIMED'`,
           [jid, a.agent_id]);
         if (!got.length) {

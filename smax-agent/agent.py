@@ -302,6 +302,18 @@ class Agent:
             self.smax_status = "ready"
             res = S.search_and_extract(page, bc, request_no=None,
                                        national_id=nid, log=log)
+            # المرحلة 3: تحليل الشكوى بأدوات Smax_V11 (معزول — فشله مابيأثرش)
+            if isinstance(res, dict) and res.get("found"):
+                try:
+                    import smax_analysis as A
+                    a = A.analyze(res, job, log=log)
+                    if a:
+                        res["analysis"] = a
+                        log("   تحليل: %s · تأخير %s يوم · رد %s" % (
+                            a.get("issue_type"), a.get("delay_days"),
+                            (a.get("reply") or {}).get("state")))
+                except Exception as e:
+                    log("   تحليل الشكوى اتخطّى: %s" % type(e).__name__)
             return True, res
         except Exception as e:
             self.smax_status = "error"
