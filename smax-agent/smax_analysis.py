@@ -50,6 +50,73 @@ def _top(bucket, n=3):
     return items[:n]
 
 
+# نفس عرض Smax_V11 (_rows_for_source/_render_matrix) مع تعديلات المستخدم 2026-09-06:
+#   • «Request Status» متشال من كل الأقسام
+#   • أدلة Discussion بتتكتب مع رقم التعليق في قائمة المناقشات
+#   • الأقسام حسب التصنيف: وهمي → تأكيد+نفي · تأخير/إجراءات/تعثر → نفي+إجراءات+تعثر
+#     · فقد/سرقة → نفي+فقد · غير كده → الخمسة
+_SOURCES = ["Shipment Last Status", "Last Comment", "Discussion", "Description"]
+_SECTIONS = [
+    ("confirmed", "✅ أدلة تأكيد تسليم الشحنة:"),
+    ("denial",    "❌ أدلة نفي التسليم:"),
+    ("procedure", "⚠️ أدلة إجراءات التسليم:"),
+    ("partial",   "📄 أدلة التعثر الجزئي:"),
+    ("loss",      "📦 أدلة الفقد / السرقة:"),
+]
+
+
+def _sections_for(issue_type):
+    it = str(issue_type or "")
+    if "وهمي" in it:
+        return ["confirmed", "denial"]
+    if "فقد" in it or "سرقة" in it:
+        return ["denial", "loss"]
+    if "تأخير" in it or "إجراءات" in it or "تعثر" in it:
+        return ["denial", "procedure", "partial"]
+    return [k for k, _ in _SECTIONS]
+
+
+def _norm_key(s):
+    import re as _re
+    return _re.sub(r"[\s\W_]+", "", str(s or "")).lower()
+
+
+def _comment_refs(phrase, comments):
+    """أرقام التعليقات اللي فيها العبارة دي (بعد توحيد المسافات والعلامات)."""
+    k = _norm_key(phrase)
+    if len(k) < 6:
+        return []
+    out = []
+    for i, c in enumerate(comments or [], start=1):
+        if k in _norm_key(c.get("text")):
+            out.append(i)
+    return out
+
+
+def _review_like_smax(ev, issue_type, comments):
+    blocks = []
+    for key, title in _SECTIONS:
+        if key not in _sections_for(issue_type):
+            continue
+        section = ev.get(key) or {}
+        rows = [title]
+        for src in _SOURCES:
+            hits = sorted([p for p, s in section.items() if src in (s or ())], key=len)
+            if not hits:
+                rows.append("%s: لا يوجد" % src)
+                continue
+            rows.append("%s:" % src)
+            for h in hits:
+                line = "- %s" % h
+                if src == "Discussion":
+                    refs = _comment_refs(h, comments)
+                    if refs:
+                        line += "  (تعليق %s)" % "، ".join(str(r) for r in refs[:4])
+                rows.append(line)
+        blocks.append("\n".join(rows))
+    return "\n\n".join(blocks)
+
+
 def _by_source(bucket, n=3, maxlen=200):
     """{phrase: set(sources)} → {source: [أول n عبارة]} بأسماء مصادر Smax_V11."""
     out = {}
@@ -106,8 +173,8 @@ def analyze(res, job, log=print):
         # وكل الأدلة من غير حد، و«لا يوجد» للفاضي. وسبب التصنيف من build_reason_v11.
         review_text, reason = "", ""
         try:
-            from reason_evidence import build_review_evidence, build_reason_v11
-            review_text = str(build_review_evidence(sources) or "")
+            from reason_evidence import build_reason_v11
+            review_text = _review_like_smax(ev, issue_type, comments)
             reason = str(build_reason_v11(sources, issue_type) or "")
         except Exception as e:
             log("عرض الأدلة (Smax_V11) فشل: %s" % type(e).__name__)
