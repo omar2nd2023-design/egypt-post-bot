@@ -131,6 +131,13 @@ def setup_baseline(page, log=print):
             remove_chip(page, n)
     sanitize_group_chip(page)
     c = read_count(page)
+    # طبقة دفاع تانية: لو العدّاد لسه مش ظاهر (الشبكة بتحمّل) نستنّاه لحد 15 ث
+    # قبل ما نحكم "baseline_failed".
+    waited = 0
+    while c is None and waited < 15000:
+        page.wait_for_timeout(1000)
+        waited += 1000
+        c = read_count(page)
     log("   الأساس جاهز — العدّاد=%s" % c)
     return c is not None
 
@@ -495,6 +502,10 @@ def sanitize_group_chip(page):
 def _wait_grid_or_login(page, max_ms=20000):
     """انتظار على دليل بعد التحميل: إمّا شريط الفلاتر (الشبكة) أو حقل
     الباسورد (صفحة الدخول) — بدل 9 ث ثابتة. حد أقصى 20 ث."""
+    # 🔴 2026-09-06 12:21: بعد تسجيل دخول جديد شريط الفلاتر بيظهر **قبل** العدّاد
+    #    بثواني، والأساس اتجهّز على شبكة لسه بتحمّل → baseline_failed. الدليل
+    #    الصح هو **العدّاد نفسه** (أو 'too many records' = الشبكة حمّلت بس محتاجة
+    #    فلتر) — مش مجرد ظهور الـchips.
     waited = 0
     while waited < max_ms:
         page.wait_for_timeout(500)
@@ -502,7 +513,7 @@ def _wait_grid_or_login(page, max_ms=20000):
         try:
             if page.locator("input[type=password]").count():
                 return "login"
-            if chip_exists(page, "Active") or read_count(page) is not None:
+            if read_count(page) is not None or too_many(page):
                 page.wait_for_timeout(1000)
                 return "grid"
         except Exception:
@@ -909,7 +920,12 @@ def run_search(page, barcode, request_no=None, national_id=None, log=print):
     """
     tried = []
     if not setup_baseline(page, log=log):
-        return {"found": False, "tried": "baseline_failed"}
+        # محاولة تانية بعد 5 ث — الحالة الوحيدة اللي شفناها: شبكة لسه بتحمّل
+        # بعد تسجيل دخول جديد (2026-09-06 12:21).
+        log("   الأساس فشل — محاولة تانية بعد 5 ث")
+        page.wait_for_timeout(5000)
+        if not setup_baseline(page, log=log):
+            return {"found": False, "tried": "baseline_failed"}
 
     # ١
     cnt, how = filter_by_column(page, "Shipment No", barcode)
