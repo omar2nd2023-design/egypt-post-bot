@@ -637,10 +637,16 @@ function timingLine(j, nowSec) {
   let accounted = 0;
   if (tracked >= sent) { L.push(`   📦 التتبّع من الملفات والتتبّع الحي استغرق: ${fmtSec(tracked - sent)}`); accounted += tracked - sent; }
   if (claimed && done >= claimed) { L.push(`   🔎 البحث في الشكاوى (SMAX) فقط استغرق: ${fmtSec(done - claimed)}`); accounted += done - claimed; }
-  // الباقي = انتظار الوكيل يلقط المهمة (استعلام كل 5–20 ث) + تسليم النتيجة —
-  // بنكتبه عشان الأرقام تجمع على الإجمالي (ملاحظة المستخدم 2026-09-05).
-  const rest = total - accounted;
-  if (accounted && rest > 0) L.push(`   ⏳ انتظار الوكيل في الطابور وتسليم النتيجة: ${fmtSec(rest)}`);
+  // انتظار الوكيل = من اكتمال التتبّع لحد ما الوكيل لقط المهمة. في مسار
+  // الـtimeout الوكيل بيبدأ **قبل** ما التتبّع يخلص (بيشتغلوا بالتوازي) فالانتظار
+  // صفر والأرقام مابتجمعش على الإجمالي — بنقولها صراحة (المستخدم 2026-09-06).
+  if (claimed && tracked) {
+    const wait = claimed - tracked;
+    if (wait > 0) L.push(`   ⏳ انتظار الوكيل في الطابور: ${fmtSec(wait)}`);
+    else if (wait < -3) L.push(`   ℹ️ <i>البحث بدأ قبل ما التتبّع يخلص (بالتوازي) — فالأرقام مش بتتجمع</i>`);
+  }
+  const deliver = nowSec - done;
+  if (deliver > 3) L.push(`   📬 تسليم النتيجة: ${fmtSec(deliver)}`);
   return L.join('\n');
 }
 
