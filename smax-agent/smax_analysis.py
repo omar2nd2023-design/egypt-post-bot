@@ -93,14 +93,35 @@ def analyze(res, job, log=print):
             "delay_days": int(delay or 0),
             "delay_basis": "received" if track.get("received_date") else
                            ("request" if track.get("request_date") else "none"),
+            # الأربعة بيرجعوا دايمًا (المستخدم 2026-09-06) — الفاضي بيتعرض «مافيش»
             "confirm": _top(ev.get("confirmed")),
             "denial": _top(ev.get("denial")),
-            "reply": _reply(res.get("id"), log),
+            "procedure": _top(ev.get("procedure")),
+            "partial": _top(ev.get("partial")),
+            "loss": _top(ev.get("loss")),
+            "reply": _reply_from_comments(comments) or _reply(res.get("id"), log),
         }
         return out
     except Exception as e:
         log("تحليل الشكوى فشل: %s: %s" % (type(e).__name__, str(e)[:120]))
         return None
+
+
+MANAGER_NAME = os.environ.get("SMAX_MANAGER_NAME", "Saleh, Omar")
+
+
+def _reply_from_comments(comments):
+    """رد مدير المشروع = **تعليقه هو** في المناقشات (المصدر الأساسي — المستخدم
+    2026-09-06: تاريخ سجل الأداة مش هو تاريخ الرد الفعلي). بيرجّع آخر تعليق
+    باسمه مع تاريخه ورقمه في القائمة، أو None لو مافيش."""
+    key = [p.strip().lower() for p in MANAGER_NAME.replace(",", " ").split() if p.strip()]
+    hit = None
+    for i, c in enumerate(comments or [], start=1):
+        author = str(c.get("author") or "").lower()
+        if key and all(k in author for k in key):
+            hit = {"state": "sent", "when": str(c.get("when") or ""), "index": i,
+                   "source": "discussions"}
+    return hit
 
 
 def _reply(complaint_id, log=print):

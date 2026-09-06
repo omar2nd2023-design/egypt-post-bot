@@ -714,6 +714,8 @@ function renderSmax(res) {
   if (res.id) L.push(`   1️⃣ رقم الشكوى: <code>${esc(res.id)}</code>`);
   if (res.creation_time) L.push(`   2️⃣ تاريخ الإنشاء: ${esc(res.creation_time)}`);
   if (res.assignment_group) L.push(`   3️⃣ الجهة: ${esc(res.assignment_group)}`);
+  // وصف الشكوى (Description) — رجع بطلب المستخدم 2026-09-06
+  if (res.description) L.push(`   📝 الوصف: ${esc(String(res.description).slice(0, 700))}`);
   if (res.found_by) L.push(`   <i>اتلقت بـ${esc(res.found_by)}</i>`);
 
   // ---- المرحلة 3: كارت التحليل (المستخدم 2026-09-06) ----
@@ -734,12 +736,21 @@ function renderSmax(res) {
       : an.delay_basis === 'request' ? ' <i>(من تاريخ الطلب)</i>' : '';
     L.push(`   ⏱ التأخير: <b>${Number(an.delay_days) || 0} يوم</b>${basis}`);
     const rp = an.reply || {};
-    L.push(rp.state === 'sent' ? `   📨 رد مدير المشروع: ✅ فيها رد — بتاريخ ${esc(rp.when)}`
-      : rp.state === 'drafted' ? '   📨 رد مدير المشروع: ✎ فيه رد متكتوب — لسه مااتبعتش'
-      : rp.state === 'none' ? '   📨 رد مدير المشروع: ❌ مافيش رد'
-      : '   📨 رد مدير المشروع: غير معروف');
+    if (rp.state === 'sent' && rp.source === 'discussions') {
+      // المصدر الأساسي: تعليق مدير المشروع نفسه في المناقشات (تاريخه ورقمه)
+      L.push(`   📨 رد مدير المشروع: ✅ فيها رد — ${esc(rp.when)}${rp.index ? ` <i>(تعليق رقم ${rp.index})</i>` : ''}`);
+    } else if (rp.state === 'sent') {
+      L.push(`   📨 رد مدير المشروع: ✅ مسجّل في الأداة بتاريخ ${esc(rp.when)} <i>(مش لاقي تعليقك في المناقشات)</i>`);
+    } else if (rp.state === 'drafted') {
+      L.push('   📨 رد مدير المشروع: ✎ فيه رد متكتوب في الأداة — لسه مااتبعتش');
+    } else if (rp.state === 'none') {
+      L.push('   📨 رد مدير المشروع: ❌ مافيش رد');
+    } else {
+      L.push('   📨 رد مدير المشروع: غير معروف');
+    }
+    // الأربعة بيظهروا دايمًا — الفاضي «مافيش» (المستخدم 2026-09-06)
     const ev = (arr, icon, title) => {
-      if (!Array.isArray(arr) || !arr.length) return;
+      if (!Array.isArray(arr) || !arr.length) { L.push(`   ${icon} <b>${title}</b>: مافيش`); return; }
       L.push(`   ${icon} <b>${title}</b>`);
       for (const [p, s] of arr) {
         const srcs = (s || []).map((x) => SRC[x] || x).join('، ');
@@ -748,9 +759,9 @@ function renderSmax(res) {
     };
     ev(an.confirm, '✅', 'أدلة التأكيد');
     ev(an.denial, '❌', 'أدلة النفي');
-    if (!(an.confirm || []).length && !(an.denial || []).length) {
-      L.push('   <i>مافيش عبارات تأكيد أو نفي واضحة</i>');
-    }
+    ev(an.procedure, '🛠', 'أدلة الإجراءات');
+    ev(an.partial, '⏳', 'أدلة التعثر/التأخير');
+    if (Array.isArray(an.loss) && an.loss.length) ev(an.loss, '📦', 'أدلة الفقد');
   }
   const lc = res.last_comment;
   if (lc) {
