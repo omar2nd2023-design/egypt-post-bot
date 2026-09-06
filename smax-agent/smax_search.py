@@ -615,6 +615,10 @@ def _fields(page):
     return page.evaluate("""() => {
       const out = {};
       document.querySelectorAll('.field-container').forEach(fc => {
+        // 🔴 2026-09-06: الصفحة فيها لوحة معاينة مخفية (preview_*) بتشيل حقول
+        //    **شكوى تانية** (شفناها: preview_Description فيها وصف مواطن مختلف).
+        //    الاسم بيتكرر فالأخير كان بيكسب — بنتجاهل المعاينة خالص.
+        if ((fc.id||'').startsWith('preview_')) return;
         const lab = fc.querySelector('.label-text');
         if (!lab) return;
         const name = (lab.innerText||'').trim();
@@ -690,8 +694,10 @@ def open_complaint(page, rid):
     try:
         desc = page.evaluate("""() => {
           const fc=[...document.querySelectorAll('.field-container')]
+            .filter(x=>!(x.id||'').startsWith('preview_'))   // مش لوحة معاينة شكوى تانية
             .find(x=>/^Description/.test(((x.querySelector('.label-text')||{}).innerText||'').trim()));
-          const root = fc || document;
+          if (!fc) return '';                                   // مفيش حقل — مانلمّش من الصفحة كلها
+          const root = fc;
           let best='';
           for (const e of root.querySelectorAll('.cke_editable,[contenteditable=true],.cke_wysiwyg_div')) {
             const t=(e.innerText||'').trim();

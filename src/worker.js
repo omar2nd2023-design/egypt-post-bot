@@ -723,7 +723,15 @@ function renderSmax(res) {
   if (res.creation_time) L.push(`   2️⃣ تاريخ الإنشاء: ${esc(res.creation_time)}`);
   if (res.assignment_group) L.push(`   3️⃣ الجهة: ${esc(res.assignment_group)}`);
   // وصف الشكوى (Description) — رجع بطلب المستخدم 2026-09-06
-  if (res.description) L.push(`   📝 الوصف: ${esc(String(res.description).slice(0, 700))}`);
+  // نص حقل Description من صفحة الشكوى في SMAX كما هو (مش وصف متولّد) —
+  // التسمية بالإنجليزي زي SMAX عشان مايتلخبطش مع أي وصف تاني (المدير 2026-09-06)
+  if (res.description) {
+    // نفس شكل الحقل في SMAX: العنوان ثم النص سطر سطر (المدير 2026-09-06)
+    L.push('   📝 Description (نص الشكوى):');
+    for (const ln of String(res.description).slice(0, 700).split(/\n+/)) {
+      if (ln.trim()) L.push(`      ${esc(ln.trim())}`);
+    }
+  }
   if (res.found_by) L.push(`   <i>اتلقت بـ${esc(res.found_by)}</i>`);
 
   // ---- المرحلة 3: كارت التحليل (المستخدم 2026-09-06) ----
