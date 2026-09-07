@@ -340,9 +340,22 @@ class Agent:
                 if attempt == 2:
                     raise
                 log("   البحث رمى %s — إعادة تحميل ومحاولة تانية" % type(e).__name__)
+            # 🔴 2026-09-07 14:39: بعد إعادة التحميل المحاولة التانية وقعت على
+            #    زرار «Add filter» (30 ث) — الشبكة كانت لسه مش جاهزة. بنستنى
+            #    شريط الفلاتر نفسه يبان، ولو الصفحة رجعت للدخول بنسجّل.
             try:
                 page.goto(S.GRID_URL, wait_until="domcontentloaded", timeout=60000)
-                S._wait_grid_or_login(page)
+                how = S._wait_grid_or_login(page)
+                if how == "login":
+                    user, pwd = self._load_creds()
+                    S.ensure_session(page, user, pwd, log=log)
+                try:
+                    page.locator('a[title="Add filter"]').first.wait_for(state="visible", timeout=20000)
+                except Exception:
+                    log("   شريط الفلاتر مابانش بعد إعادة التحميل — تحميل تاني")
+                    page.goto(S.GRID_URL, wait_until="domcontentloaded", timeout=60000)
+                    S._wait_grid_or_login(page)
+                    page.wait_for_timeout(3000)
             except Exception:
                 pass
 

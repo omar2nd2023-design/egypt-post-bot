@@ -232,19 +232,28 @@ def filter_by_column(page, column, value, tries=4):
         if not box:
             return None, "column_not_reachable"
         # التحويم بيشيل الـhidden عن زرار الفلتر
-        page.mouse.move(box["x"], box["y"])
-        page.wait_for_timeout(1200)
-        btn = page.evaluate("""(name) => {
-          const h=[...document.querySelectorAll('.slick-header-column')].find(e=>{
-            const s=e.querySelector('.slick-column-name');
-            return s && s.innerText.trim()===name;});
-          if(!h) return null;
-          const b=h.querySelector('.slick-header-button');
-          if(!b) return null;
-          const r=b.getBoundingClientRect();
-          if(!r.width) return {hidden:true};
-          return {x:r.left+r.width/2, y:r.top+r.height/2};
-        }""", column)
+        # 🔴 2026-09-07 14:39: التحويم الأول أحيانًا مابيظهّرش الزرار (رجع
+        #    filter_button_hidden والشبكة سليمة) — نبعد الماوس ونرجع لحد 3 مرات.
+        btn = None
+        for _hover in range(3):
+            if _hover:
+                page.mouse.move(max(box["x"] - 80, 5), box["y"] + 40)
+                page.wait_for_timeout(400)
+            page.mouse.move(box["x"], box["y"])
+            page.wait_for_timeout(1200)
+            btn = page.evaluate("""(name) => {
+              const h=[...document.querySelectorAll('.slick-header-column')].find(e=>{
+                const s=e.querySelector('.slick-column-name');
+                return s && s.innerText.trim()===name;});
+              if(!h) return null;
+              const b=h.querySelector('.slick-header-button');
+              if(!b) return null;
+              const r=b.getBoundingClientRect();
+              if(!r.width) return {hidden:true};
+              return {x:r.left+r.width/2, y:r.top+r.height/2};
+            }""", column)
+            if btn and not btn.get("hidden"):
+                break
         if not btn or btn.get("hidden"):
             return None, "filter_button_hidden"
         page.mouse.click(btn["x"], btn["y"])
