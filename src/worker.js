@@ -1014,7 +1014,10 @@ async function handleUpdate(env, update, ctx) {
       jobMade = true;
     } catch (e) { /* الطابور مش متاح — التتبّع بيكمّل عادي */ }
   }
-  await edit(filesText + (jobMade ? SEARCHING_TAIL : (smaxWorthIt(row) ? '' : smaxSkipTail(row))));
+  // المدير 2026-09-07: لو مافيش بحث (مش في ملفاتنا / طلب جديد) سطر «مافيش شكوى
+  // متوقعة» بيتكتب **بعد** ما التتبّع الحيّ يوصل (renderResult) — الترتيب:
+  // الملفات ← التتبّع الحيّ ← الشكوى.
+  await edit(filesText + (jobMade ? SEARCHING_TAIL : ''));
 
   // 3) التتبّع الحيّ — مدير التوكن بيتصرّف: صالح يرجّعه، قرب يخلص
   //    يجدّد في الخلفية، خلص يجدّد ويستنّى. الرسالة فيها الملفات خلاص،
@@ -1349,8 +1352,9 @@ export default {
         if (journey?.err === 'timeout') return;          // /finish → renderResult
         await renderResult(env, 'bubble', msgId, bc, journey);
       })().catch(() => {}));
+      // مافيش بحث؟ سطر السبب بيظهر بعد التتبّع الحيّ (GET /bubble) — الملفات ← التتبّع ← الشكوى
       const tail = !jobId ? '\n━━━━━━━━━━━━━━━━━━━━\n📋 <b>الشكوى</b>: الطابور مش متاح دلوقتي.'
-                          : (smaxWorthIt(row) ? SEARCHING_TAIL : smaxSkipTail(row));
+                          : (smaxWorthIt(row) ? SEARCHING_TAIL : '');
       return Response.json({ ok: true, job_id: jobId, text: filesText + tail });
     }
     if (url.pathname === '/bubble' && request.method === 'GET') {
@@ -1386,7 +1390,7 @@ export default {
       } else if (j.status === 'FAILED' || j.status === 'TIMEOUT') {
         tail = SMAX_FAIL_TAIL;
       } else if (j.status === 'SKIPPED') {
-        tail = smaxSkipTail(row);
+        tail = j.tracking_text ? smaxSkipTail(row) : '';   // بعد التتبّع الحيّ بس
       } else {
         tail = '\n━━━━━━━━━━━━━━━━━━━━\n🔎 جاري البحث عن الشكوى في SMAX...';
       }
