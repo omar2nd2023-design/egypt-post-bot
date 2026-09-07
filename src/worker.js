@@ -351,7 +351,7 @@ async function renderResult(env, chatId, msgId, bc, journey) {
       } else if (j.status === 'SKIPPED') {
         smaxTail = smaxSkipTail(row);
       } else {
-        smaxTail = SEARCHING_TAIL;
+        smaxTail = await searchingTail(env);
       }
     }
   } catch (e) { smaxTail = ''; }
@@ -376,6 +376,23 @@ async function renderResult(env, chatId, msgId, bc, journey) {
 const SMAX_FAIL_TAIL =
   '\n━━━━━━━━━━━━━━━━━━━━\n🟪 📋 <b>الشكوى</b>\n🔴 <b>تعذّر البحث دلوقتي</b> — جرّب تاني بعد شوية.';
 const SEARCHING_TAIL = '\n━━━━━━━━━━━━━━━━━━━━\n🔵 🔎 جاري البحث عن الشكوى في SMAX...';
+/** المدير 2026-09-07 16:43: البحث «شغّال» 6 دقايق والوكيل كان ميت أصلًا (الحارس
+ *  رجّعه بعد 10 دقايق). لو آخر نبضة من الوكيل أقدم من 90 ثانية بنقول كده صراحة
+ *  بدل عدّاد صامت. */
+async function searchingTail(env) {
+  let note = '';
+  try {
+    const rows = await tursoQuery(env, 'SELECT MAX(CAST(last_seen AS INTEGER)) AS t FROM agent_state');
+    const t = Number(rows?.[0]?.t) || 0;
+    const age = Math.floor(Date.now() / 1000) - t;
+    if (!t || age > 90) {
+      const m = t ? Math.max(1, Math.round(age / 60)) : null;
+      note = '\n🔴 <b>الوكيل على الجهاز مش متصل' + (m ? ` من ${m} دقيقة` : '') + '</b> — '
+           + 'الحارس بيعيد تشغيله تلقائيًا خلال 5 دقايق، والبحث هيكمّل لوحده بعدها.';
+    }
+  } catch (e) { note = ''; }
+  return SEARCHING_TAIL + note;
+}
 // المدير 2026-09-07: لو الشحنة مش في ملفاتنا مافيش بحث في SMAX — يا الرقم غلط
 // يا الشحنة لسه ماوصلتناش، وفي الحالتين مش هتلاقي شكوى، فمانضيّعش وقت.
 const NO_INDEX_TAIL =
@@ -1061,7 +1078,7 @@ async function handleUpdate(env, update, ctx) {
   // المدير 2026-09-07: لو مافيش بحث (مش في ملفاتنا / طلب جديد) سطر «مافيش شكوى
   // متوقعة» بيتكتب **بعد** ما التتبّع الحيّ يوصل (renderResult) — الترتيب:
   // الملفات ← التتبّع الحيّ ← الشكوى.
-  await edit(filesText + (jobMade ? SEARCHING_TAIL : ''));
+  await edit(filesText + (jobMade ? await searchingTail(env) : ''));
 
   // 3) التتبّع الحيّ — مدير التوكن بيتصرّف: صالح يرجّعه، قرب يخلص
   //    يجدّد في الخلفية، خلص يجدّد ويستنّى. الرسالة فيها الملفات خلاص،
@@ -1436,7 +1453,7 @@ export default {
       } else if (j.status === 'SKIPPED') {
         tail = j.tracking_text ? smaxSkipTail(row) : '';   // بعد التتبّع الحيّ بس
       } else {
-        tail = SEARCHING_TAIL;
+        tail = await searchingTail(env);
       }
       return Response.json({ ok: true, status: j.status, tracking_ready: !!j.tracking_text,
                              text: head + tail });
