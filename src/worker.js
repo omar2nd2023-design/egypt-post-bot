@@ -775,11 +775,18 @@ function renderSmax(res) {
   if (!res) return '';
   const L = ['', '━━━━━━━━━━━━━━━━━━━━'];
   if (res.found === false) {
-    L.push('📋 <b>الشكوى</b>: مالقيناش شكوى في SMAX.');
-    if (res.tried) L.push(`   <i>جرّبنا: ${esc(res.tried)}</i>`);
+    // المدير 2026-09-07: أوضح وأبرز — تليجرام مافيهوش ألوان نص، فبنستخدم
+    // علامة حمراء وعناوين غامقة وخطوات البحث كقائمة مرقّمة بدل سطر طويل.
+    L.push('📋 <b>الشكوى</b>');
+    L.push('🔴 <b><u>مالقيناش شكوى في SMAX</u></b> — لا مفتوحة ولا مقفولة');
+    const steps = String(res.tried || '').split(' ← ').map((s) => s.trim()).filter(Boolean);
+    if (steps.length) {
+      L.push(`<i>اللي اتجرّب (${steps.length} خطوات، كلها من غير نتيجة):</i>`);
+      steps.forEach((s, i) => L.push(`   ${i + 1}. ${esc(s)}`));
+    }
     return L.join('\n');
   }
-  L.push('📋 <b>بيانات الشكوى</b>');
+  L.push('📋 <b>بيانات الشكوى</b> 🟢 <b>لقينا الشكوى</b>');
   // قرار المستخدم 2026-09-06: لو مالقيناش بـActive=Yes بنبحث بـActive=No
   // ونقول صراحة إنها مقفولة.
   if (res.closed) L.push('   ⚠️ <b>الشكوى مغلقة</b> — اتلقت بعد تغيير الفلتر Active إلى No');
