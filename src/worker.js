@@ -374,12 +374,12 @@ async function renderResult(env, chatId, msgId, bc, journey) {
 // المدير 2026-09-07: تليجرام مافيهوش ألوان نص — العلامات الملوّنة هي اللون:
 // 🔴 حرج/فشل · 🟢 نجاح · 🟠 تنبيه/مافيش بحث · 🔵 انتظار
 const SMAX_FAIL_TAIL =
-  '\n━━━━━━━━━━━━━━━━━━━━\n📋 <b>الشكوى</b>\n🔴 <b>تعذّر البحث دلوقتي</b> — جرّب تاني بعد شوية.';
+  '\n━━━━━━━━━━━━━━━━━━━━\n🟪 📋 <b>الشكوى</b>\n🔴 <b>تعذّر البحث دلوقتي</b> — جرّب تاني بعد شوية.';
 const SEARCHING_TAIL = '\n━━━━━━━━━━━━━━━━━━━━\n🔵 🔎 جاري البحث عن الشكوى في SMAX...';
 // المدير 2026-09-07: لو الشحنة مش في ملفاتنا مافيش بحث في SMAX — يا الرقم غلط
 // يا الشحنة لسه ماوصلتناش، وفي الحالتين مش هتلاقي شكوى، فمانضيّعش وقت.
 const NO_INDEX_TAIL =
-  '\n━━━━━━━━━━━━━━━━━━━━\n📋 <b>الشكوى</b>\n🟠 <b>الشحنة مش في ملفاتنا — مافيش بحث في SMAX</b> '
+  '\n━━━━━━━━━━━━━━━━━━━━\n🟪 📋 <b>الشكوى</b>\n🟠 <b>الشحنة مش في ملفاتنا — مافيش بحث في SMAX</b> '
   + '(يا الرقم غلط يا لسه ماوصلتناش).';
 // المدير 2026-09-07: طلب عمره أقل من 5 أيام مش هيبقى له شكوى (نظام الشكاوى
 // مابيقبلش قبل كده) — مانضيّعش وقت في SMAX ونقول السبب.
@@ -395,7 +395,7 @@ function tooRecent(row) {
   return days <= RECENT_DAYS;
 }
 function recentTail(row) {
-  return `\n━━━━━━━━━━━━━━━━━━━━\n📋 <b>الشكوى</b>\n🟠 <b>تاريخ الطلب ${esc(String(row?.r || '').slice(0, 10))} `
+  return `\n━━━━━━━━━━━━━━━━━━━━\n🟪 📋 <b>الشكوى</b>\n🟠 <b>تاريخ الطلب ${esc(String(row?.r || '').slice(0, 10))} `
     + `عمره ${RECENT_DAYS} أيام أو أقل</b> — مافيش شكوى متوقعة قبل كده، فمافيش بحث في SMAX دلوقتي. `
     + `ابعتها تاني من اليوم السادس.`;
 }
@@ -434,7 +434,9 @@ function buildReply(bc, row, journey) {
   L.push('━━━━━━━━━━━━━━━━━━━━');
 
   if (row) {
-    L.push('👤 <b>بيانات الطلب</b>');
+    // المدير 2026-09-07: علامة ملوّنة قبل كل قسم عشان الأقسام تتفرق عن بعض:
+    // 🟦 بيانات الطلب · 🟩 الملفات · 🟧 التتبّع الحيّ · 🟪 الشكوى · 🟫 التحليل
+    L.push('🟦 👤 <b>بيانات الطلب</b>');
     if (row.n) L.push(`   الاسم: ${row.n}`);
     if (row.p) L.push(`   الموبايل: <code>${row.p}</code>`);
     if (row.nid) L.push(`   الرقم القومي: <code>${row.nid}</code>`);
@@ -448,27 +450,27 @@ function buildReply(bc, row, journey) {
     const keys = TYPE_ORDER.filter((k) => files[k]);
     if (keys.length) {
       L.push('');
-      L.push('📂 <b>ظهرت في ملفاتنا</b>');
+      L.push('🟩 📂 <b>ظهرت في ملفاتنا</b>');
       for (const k of keys) L.push(`   ${TYPE_NAMES[k]}: ${fmtDays(files[k])}`);
     }
   } else {
-    L.push('ℹ️ مش موجودة في ملفاتنا المحلية.');
+    L.push('🟩 📂 <b>ملفاتنا</b>: 🟠 مش موجودة في ملفاتنا المحلية.');
   }
 
   L.push('');
   if (journey?.err === 'pending') {
     // المدير 2026-09-07: الملفات بتتعرض فورًا، والتتبّع الحيّ بيتكمّل بعدها
-    L.push('🌐 <b>التتبّع الحيّ</b>: ⏳ لسه بيتجمّع من البوابة...');
+    L.push('🟧 🌐 <b>التتبّع الحيّ</b>: ⏳ لسه بيتجمّع من البوابة...');
   } else if (journey?.err === 'refresh-failed' || journey?.err === 'no-token') {
-    L.push('🌐 <b>التتبّع الحيّ</b>: 🔴 <b>تعذّر تجديد التوكن</b>.');
+    L.push('🟧 🌐 <b>التتبّع الحيّ</b>: 🔴 <b>تعذّر تجديد التوكن</b>.');
     L.push('   <i>جرّب تاني بعد شوية — أو شوف GitHub Actions.</i>');
   } else if (journey?.err) {
-    L.push(`🌐 <b>التتبّع الحيّ</b>: 🔴 مش متاح (${journey.err})`);
+    L.push(`🟧 🌐 <b>التتبّع الحيّ</b>: 🔴 مش متاح (${journey.err})`);
   } else if (!journey?.records?.length) {
-    L.push('🌐 <b>التتبّع الحيّ</b>: 🟠 البريد مالوش سجل للباركود ده.');
+    L.push('🟧 🌐 <b>التتبّع الحيّ</b>: 🟠 البريد مالوش سجل للباركود ده.');
   } else {
     const recs = journey.records;
-    L.push(`🌐 <b>رحلة الشحنة</b> — ${recs.length} حالة`);
+    L.push(`🟧 🌐 <b>رحلة الشحنة</b> — ${recs.length} حالة`);
     if (journey.status) L.push(`   ◀ <b>آخر حالة: ${journey.status}</b>`);
     L.push('');
     // المدير 2026-09-06: كل الحالات، مش 15 بس. الحد الوحيد هو طول رسالة
@@ -804,7 +806,7 @@ function renderSmax(res) {
   if (res.found === false) {
     // المدير 2026-09-07: أوضح وأبرز — تليجرام مافيهوش ألوان نص، فبنستخدم
     // علامة حمراء وعناوين غامقة وخطوات البحث كقائمة مرقّمة بدل سطر طويل.
-    L.push('📋 <b>الشكوى</b>');
+    L.push('🟪 📋 <b>الشكوى</b>');
     L.push('🔴 <b><u>مالقيناش شكوى في SMAX</u></b> — لا مفتوحة ولا مقفولة');
     const steps = String(res.tried || '').split(' ← ').map((s) => s.trim()).filter(Boolean);
     if (steps.length) {
@@ -813,7 +815,7 @@ function renderSmax(res) {
     }
     return L.join('\n');
   }
-  L.push('📋 <b>بيانات الشكوى</b> 🟢 <b>لقينا الشكوى</b>');
+  L.push('🟪 📋 <b>بيانات الشكوى</b> 🟢 <b>لقينا الشكوى</b>');
   if (res.cached_from) {
     const ago = Math.max(1, Math.round((Date.now() / 1000 - Number(res.cached_from)) / 60));
     L.push(`   ♻️ <i>نفس الشحنة اتبحثت من ${ago} دقيقة — دي نتيجتها المحفوظة (بحث جديد بعد 30 دقيقة)</i>`);
@@ -845,7 +847,7 @@ function renderSmax(res) {
                   'Shipment Last Status': 'آخر حالة شحنة', 'Before Last Status': 'الحالة قبل الأخيرة' };
     L.push('');
     L.push('━━━━━━━━━━━━━━━━━━━━');
-    L.push('🧠 <b>تحليل الشكوى</b>');
+    L.push('🟫 🧠 <b>تحليل الشكوى</b>');
     if (an.issue_type) {
       // المدير 2026-09-06: التصنيف لوحده من غير مصدره بين قوسين
     const src = '';
@@ -1395,7 +1397,7 @@ export default {
         await renderResult(env, 'bubble', msgId, bc, journey);
       })().catch(() => {}));
       // مافيش بحث؟ سطر السبب بيظهر بعد التتبّع الحيّ (GET /bubble) — الملفات ← التتبّع ← الشكوى
-      const tail = !jobId ? '\n━━━━━━━━━━━━━━━━━━━━\n📋 <b>الشكوى</b>: الطابور مش متاح دلوقتي.'
+      const tail = !jobId ? '\n━━━━━━━━━━━━━━━━━━━━\n🟪 📋 <b>الشكوى</b>: الطابور مش متاح دلوقتي.'
                           : (smaxWorthIt(row) ? SEARCHING_TAIL : '');
       return Response.json({ ok: true, job_id: jobId, text: filesText + tail });
     }
@@ -1434,7 +1436,7 @@ export default {
       } else if (j.status === 'SKIPPED') {
         tail = j.tracking_text ? smaxSkipTail(row) : '';   // بعد التتبّع الحيّ بس
       } else {
-        tail = '\n━━━━━━━━━━━━━━━━━━━━\n🔎 جاري البحث عن الشكوى في SMAX...';
+        tail = SEARCHING_TAIL;
       }
       return Response.json({ ok: true, status: j.status, tracking_ready: !!j.tracking_text,
                              text: head + tail });
