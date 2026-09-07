@@ -386,12 +386,16 @@ function tooRecent(row) {
   const r = String(row?.r || '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(r)) return false;
   const t = Date.parse(r + 'T00:00:00Z');
-  return Number.isFinite(t) && (Date.now() - t) < RECENT_DAYS * 86400e3;
+  if (!Number.isFinite(t)) return false;
+  // المدير: «5 أيام فأقل» — يعني عمر الطلب بالأيام ≤ 5 (البحث من اليوم السادس).
+  // 2026-09-07: طلب 09-02 (5 أيام بالظبط) اتبحث بالغلط لأن الشرط كان «أقل من 5».
+  const days = Math.floor((Date.now() - t) / 86400e3);
+  return days <= RECENT_DAYS;
 }
 function recentTail(row) {
   return `\n━━━━━━━━━━━━━━━━━━━━\n📋 <b>الشكوى</b>: تاريخ الطلب ${esc(String(row?.r || '').slice(0, 10))} `
-    + `لسه معدّاش ${RECENT_DAYS} أيام — مافيش شكوى متوقعة قبل كده، فمافيش بحث في SMAX دلوقتي. `
-    + `ابعتها تاني بعد ما تعدّي الـ${RECENT_DAYS} أيام.`;
+    + `عمره ${RECENT_DAYS} أيام أو أقل — مافيش شكوى متوقعة قبل كده، فمافيش بحث في SMAX دلوقتي. `
+    + `ابعتها تاني من اليوم السادس.`;
 }
 /** ذيل الشكوى لما مافيش بحث: مش في ملفاتنا / طلب جديد */
 function smaxSkipTail(row) {
