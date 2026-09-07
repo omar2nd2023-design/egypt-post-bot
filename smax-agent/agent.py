@@ -303,6 +303,7 @@ class Agent:
             res = self._search_with_retry(page, bc, nid, log)
             # المرحلة 3: تحليل الشكوى بأدوات Smax_V11 (معزول — فشله مابيأثرش)
             if isinstance(res, dict) and res.get("found"):
+                job = self._with_fresh_track(job, log)
                 try:
                     import smax_analysis as A
                     a = A.analyze(res, job, log=log)
@@ -353,6 +354,39 @@ class Agent:
             "version": "phase2",
             "host_os": platform.system(),
         }
+
+    def _get(self, path):
+        req = urllib.request.Request(
+            self.base + path, method="GET",
+            headers={"Authorization": "Bearer " + self.secret,
+                     "User-Agent": "smax-agent/2.0"})
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+            return r.status, json.loads(r.read().decode("utf-8", "replace"))
+
+    def _with_fresh_track(self, job, log, max_wait=45):
+        """2026-09-07 (المدير): مهمة SMAX بقت تتعمل **قبل** التتبّع الحيّ عشان
+        الملفات تتعرض فورًا والباقي يمشي بالتوازي. بوّابة Smax_V11 محتاجة أحداث
+        الرحلة، فقبل التحليل بنجيب أحدث track من الـWorker ونستنّى لحد ما
+        التتبّع يوصل (بحد أقصى 45 ث — البحث نفسه بياخد أكتر من كده عادةً)."""
+        import urllib.parse
+        jid = str(job.get("job_id") or "")
+        if not jid:
+            return job
+        t0 = time.time()
+        while True:
+            try:
+                code, j = self._get("/agent/track?job_id=" + urllib.parse.quote(jid, safe=""))
+                if code == 200 and isinstance(j, dict):
+                    if j.get("track"):
+                        job = dict(job, track=j["track"])
+                    if j.get("tracking_ready"):
+                        return job
+            except Exception:
+                pass
+            if time.time() - t0 > max_wait:
+                log("   التتبّع الحيّ ماوصلش خلال %d ث — التحليل بأحداث ناقصة" % max_wait)
+                return job
+            time.sleep(3)
 
     def _post(self, path, obj):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")

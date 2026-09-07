@@ -348,11 +348,15 @@ async function renderResult(env, chatId, msgId, bc, journey) {
         smaxTail = res ? renderSmax(res) + timingLine(j, nowSec) : '';
       } else if (j.status === 'FAILED' || j.status === 'TIMEOUT') {
         smaxTail = SMAX_FAIL_TAIL + timingLine(j, nowSec);
+      } else if (j.status === 'SKIPPED') {
+        smaxTail = smaxSkipTail(row);
       } else {
-        smaxTail = '\n━━━━━━━━━━━━━━━━━━━━\n🔎 جاري البحث عن الشكوى في SMAX...';
+        smaxTail = SEARCHING_TAIL;
       }
     }
   } catch (e) { smaxTail = ''; }
+  // المدير 2026-09-07: مش في ملفاتنا / طلب جديد = مافيش بحث في الشكاوى أصلًا
+  if (!smaxTail && !smaxWorthIt(row)) smaxTail = smaxSkipTail(row);
 
   // مهام البالون: مافيش رسالة تليجرام — النص اتحفظ في المهمة والبالون بيقراه من GET /bubble
   if (String(chatId) === 'bubble') return;
@@ -369,6 +373,34 @@ async function renderResult(env, chatId, msgId, bc, journey) {
 
 const SMAX_FAIL_TAIL =
   '\n━━━━━━━━━━━━━━━━━━━━\n📋 <b>الشكوى</b>: تعذّر البحث دلوقتي — جرّب تاني بعد شوية.';
+const SEARCHING_TAIL = '\n━━━━━━━━━━━━━━━━━━━━\n🔎 جاري البحث عن الشكوى في SMAX...';
+// المدير 2026-09-07: لو الشحنة مش في ملفاتنا مافيش بحث في SMAX — يا الرقم غلط
+// يا الشحنة لسه ماوصلتناش، وفي الحالتين مش هتلاقي شكوى، فمانضيّعش وقت.
+const NO_INDEX_TAIL =
+  '\n━━━━━━━━━━━━━━━━━━━━\n📋 <b>الشكوى</b>: الشحنة مش في ملفاتنا — مافيش بحث في SMAX '
+  + '(يا الرقم غلط يا لسه ماوصلتناش).';
+// المدير 2026-09-07: طلب عمره أقل من 5 أيام مش هيبقى له شكوى (نظام الشكاوى
+// مابيقبلش قبل كده) — مانضيّعش وقت في SMAX ونقول السبب.
+const RECENT_DAYS = 5;
+function tooRecent(row) {
+  const r = String(row?.r || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(r)) return false;
+  const t = Date.parse(r + 'T00:00:00Z');
+  return Number.isFinite(t) && (Date.now() - t) < RECENT_DAYS * 86400e3;
+}
+function recentTail(row) {
+  return `\n━━━━━━━━━━━━━━━━━━━━\n📋 <b>الشكوى</b>: تاريخ الطلب ${esc(String(row?.r || '').slice(0, 10))} `
+    + `لسه معدّاش ${RECENT_DAYS} أيام — مافيش شكوى متوقعة قبل كده، فمافيش بحث في SMAX دلوقتي. `
+    + `ابعتها تاني بعد ما تعدّي الـ${RECENT_DAYS} أيام.`;
+}
+/** ذيل الشكوى لما مافيش بحث: مش في ملفاتنا / طلب جديد */
+function smaxSkipTail(row) {
+  return row ? (tooRecent(row) ? recentTail(row) : NO_INDEX_TAIL) : NO_INDEX_TAIL;
+}
+/** هل نبحث في SMAX أصلًا؟ */
+function smaxWorthIt(row) {
+  return !!row && !tooRecent(row);
+}
 
 /** يكتب التتبّع + الشكوى في **نفس الرسالة**؛ لو النص عدّى حد تليجرام
  *  الباقي بيتبعت كردود متتابعة على نفس الرسالة. */
@@ -418,7 +450,10 @@ function buildReply(bc, row, journey) {
   }
 
   L.push('');
-  if (journey?.err === 'refresh-failed' || journey?.err === 'no-token') {
+  if (journey?.err === 'pending') {
+    // المدير 2026-09-07: الملفات بتتعرض فورًا، والتتبّع الحيّ بيتكمّل بعدها
+    L.push('🌐 <b>التتبّع الحيّ</b>: ⏳ لسه بيتجمّع من البوابة...');
+  } else if (journey?.err === 'refresh-failed' || journey?.err === 'no-token') {
     L.push('🌐 <b>التتبّع الحيّ</b>: تعذّر تجديد التوكن.');
     L.push('   <i>جرّب تاني بعد شوية — أو شوف GitHub Actions.</i>');
   } else if (journey?.err) {
@@ -583,10 +618,13 @@ async function createSmaxJob(env, j) {
     `INSERT INTO smax_jobs
        (job_id, corr_id, chat_id, message_id, barcode, national_id,
         status, attempts, created_at, expires_at, tracking_text, sent_at, tracked_at, track)
-     VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(job_id) DO NOTHING`,
     [jobId, j.corr_id, String(j.chat_id), String(j.message_id), j.barcode,
-     j.national_id || '', now, now + JOB_EXPIRY_SEC, j.tracking_text || '',
+     // SKIPPED (المدير 2026-09-07): الشحنة مش في ملفاتنا → مافيش بحث في SMAX،
+     // بس المهمة بتفضل موجودة عشان البالون يقرا نص التتبّع منها.
+     j.national_id || '', j.status === 'SKIPPED' ? 'SKIPPED' : 'PENDING',
+     now, now + JOB_EXPIRY_SEC, j.tracking_text || '',
      // ⚠️ tursoQuery بيبعت الوسائط كنص — null بيتحوّل لكلمة "null". بنستخدم 0
      //    كـ«لسه» وrenderResult بيملاه لما التتبّع يوصل.
      j.sent_at || now, j.tracking_text ? now : 0, j.track || '']);
@@ -960,11 +998,29 @@ async function handleUpdate(env, update, ctx) {
     row = rows[0] || null;
   } catch (e) { /* الفهرس مش متاح — نكمّل بالتتبّع الحيّ */ }
 
-  // 2) التتبّع الحيّ — مدير التوكن بيتصرّف: صالح يرجّعه، قرب يخلص
-  //    يجدّد في الخلفية، خلص يجدّد ويستنّى وإحنا بنحدّث نفس الرسالة.
+  // 2) (المدير 2026-09-07) **الملفات فورًا** — مش محتاجة توكن ولا بوابة —
+  //    ومهمة SMAX فورًا كمان، عشان البحث في الشكاوى والتوكن والتتبّع الحيّ
+  //    يمشوا بالتوازي بدل ما يستنّوا بعض. لو الشحنة مش في ملفاتنا مافيش
+  //    مهمة SMAX أصلًا (مش هتلاقي شكوى — الرقم غلط أو لسه ماوصلتناش).
+  const filesText = buildReply(bc, row, { err: 'pending' });
+  let jobMade = false;
+  if (msgId && env.AGENT_SECRET && smaxWorthIt(row)) {
+    try {
+      await createSmaxJob(env, {
+        corr_id: newCorrId(), chat_id: chatId, message_id: msgId, barcode: bc,
+        national_id: row?.nid || '', tracking_text: '', sent_at: sentAt,
+        track: trackSummary(row, null),    // الأحداث بتتكمّل في renderResult
+      });
+      jobMade = true;
+    } catch (e) { /* الطابور مش متاح — التتبّع بيكمّل عادي */ }
+  }
+  await edit(filesText + (jobMade ? SEARCHING_TAIL : (smaxWorthIt(row) ? '' : smaxSkipTail(row))));
+
+  // 3) التتبّع الحيّ — مدير التوكن بيتصرّف: صالح يرجّعه، قرب يخلص
+  //    يجدّد في الخلفية، خلص يجدّد ويستنّى. الرسالة فيها الملفات خلاص،
+  //    فمابنكتبش «بنجدّد التوكن» فوقها.
   let journey = null;
-  const notify = (s) =>
-    edit(`🔍 <b>${bc}</b>\n━━━━━━━━━━━━━━━━━━━━\n🔑 بنجدّد التوكن... ${s}ث`);
+  const notify = () => {};
 
   // مدير التوكن بيفضل شغّال زي ما هو بالحرف — بس بحد زمني على
   // الانتظار. في الحالة الدافية بيرجّع في أقل من عُشر ثانية فالحد
@@ -993,7 +1049,6 @@ async function handleUpdate(env, update, ctx) {
     if (journey.err === 'expired') {
       // التوكن اترفض وإحنا بنشتغل. نجدّد ونعيد **مرة واحدة بس** —
       // العلم ده بيمنع أي دورة إعادة لا نهائية.
-      await edit(`🔍 <b>${bc}</b>\n━━━━━━━━━━━━━━━━━━━━\n🔑 بنجدّد التوكن...`);
       const fresh = await renewNow(env, notify);
       journey = fresh
         ? await fetchJourney(bc, fresh, env, TRACK_BUDGET_MS, deliverTo)
@@ -1011,42 +1066,19 @@ async function handleUpdate(env, update, ctx) {
   // اللي هتنده علينا على /finish أول ما تخلّص، وهي تعدّل الرسالة.
   // المستخدم مابيعملش حاجة — نفس الرسالة هتتحدّث بالنتيجة.
   if (journey?.err === 'timeout' && deliverTo) {
-    // البوابة هي اللي هتكتب التتبّع في الرسالة دي عن طريق /finish (مجمّد).
-    // مهمة SMAX بتتعمل هنا برضه — **من غير نص تتبّع**، والوكيل لما يخلّص
-    // بيرد برسالة جديدة على الرسالة دي بدل ما يعدّلها (عشان مانمسحش
-    // اللي /finish كتبه). لولا كده أي شحنة تتبّعها بطيء ماكانتش هتتبحث.
-    let waitTxt = `🔍 <b>${bc}</b>\n━━━━━━━━━━━━━━━━━━━━\n⏳ بندوّر... (بناخد وقت زيادة شوية)`;
-    if (msgId && env.AGENT_SECRET) {
-      try {
-        await createSmaxJob(env, {
-          corr_id: newCorrId(), chat_id: chatId, message_id: msgId, barcode: bc,
-          national_id: row?.nid || '', tracking_text: '', sent_at: sentAt,
-          track: trackSummary(row, null),   // التتبّع الحي بيتكمّل في renderResult
-        });
-        waitTxt += '\n🔎 وجاري البحث عن الشكوى في SMAX...';
-      } catch (e) { /* الطابور مش متاح — التتبّع شغّال زي ما هو */ }
-    }
-    await edit(waitTxt);
+    // البوابة هي اللي هتكتب التتبّع في الرسالة دي عن طريق /finish (مجمّد)
+    // → renderResult. الملفات ومهمة SMAX اتعملوا فوق خلاص.
     return;
   }
 
-  const trackingText = buildReply(bc, row, journey);
-  await edit(trackingText);
-
-  // ---- طابور SMAX — إضافة معزولة ----
-  // ⚠️ أي فشل هنا **مابيأثرش** على رد التتبّع اللي اتبعت فوق.
-  //    الرسالة بتفضل زي ما هي والمستخدم واخد اللي طلبه.
-  if (msgId && env.AGENT_SECRET) {
-    try {
-      const corr = newCorrId();
-      await createSmaxJob(env, {
-        corr_id: corr, chat_id: chatId, message_id: msgId, barcode: bc,
-        national_id: row?.nid || '', tracking_text: trackingText, sent_at: sentAt,
-        track: trackSummary(row, journey),
-      });
-      await edit(trackingText
-        + '\n━━━━━━━━━━━━━━━━━━━━\n🔎 جاري البحث عن الشكوى في SMAX...');
-    } catch (e) { /* الطابور مش متاح — التتبّع اتبعت خلاص */ }
+  // 4) التتبّع وصل: renderResult بتحفظه في المهمة (نص + أحداث للوكيل)
+  //    وبتكتب في **نفس الرسالة** الملفات + التتبّع + حالة الشكوى الحالية
+  //    (جاري البحث / النتيجة لو الوكيل سبقنا / مافيش بحث لو مش في ملفاتنا).
+  if (msgId) {
+    try { await renderResult(env, chatId, msgId, bc, journey); }
+    catch (e) { await edit(buildReply(bc, row, journey)); }
+  } else {
+    await edit(buildReply(bc, row, journey));
   }
 }
 
@@ -1243,6 +1275,25 @@ export default {
       }
     }
 
+    // ---- أحدث تتبّع للمهمة (2026-09-07) ----
+    // مهمة SMAX بتتعمل **قبل** التتبّع الحيّ. الوكيل قبل التحليل بيسأل هنا
+    // عشان بوّابة Smax_V11 تاخد أحداث الرحلة الحقيقية.
+    if (url.pathname === '/agent/track' && request.method === 'GET') {
+      const auth = request.headers.get('Authorization') || '';
+      if (!env.AGENT_SECRET || auth !== `Bearer ${env.AGENT_SECRET}`) {
+        return new Response('unauthorized', { status: 401 });
+      }
+      const jid = url.searchParams.get('job_id') || '';
+      if (!jid || jid.length > 80) return new Response('bad job_id', { status: 400 });
+      let rows;
+      try {
+        rows = await tursoQuery(env, 'SELECT track, tracking_text FROM smax_jobs WHERE job_id=?', [jid]);
+      } catch (e) { return Response.json({ ok: false, error: 'store_failed' }, { status: 503 }); }
+      if (!rows.length) return new Response('not found', { status: 404 });
+      return Response.json({ ok: true, track: rows[0].track || '',
+                             tracking_ready: !!rows[0].tracking_text });
+    }
+
     // ---- البالون على الكمبيوتر (المرحلة 4، المستخدم 2026-09-06) ----
     // نفس نص البوت بالحرف: التتبّع من نفس الكود (buildReply) + الشكوى من نفس
     // الوكيل والطابور + نفس العرض (renderSmax/timingLine). البالون مالوش أي
@@ -1265,39 +1316,42 @@ export default {
         const rows = await tursoQuery(env, 'SELECT * FROM bc WHERE code = ?', [bc]);
         row = rows[0] || null;
       } catch (e) { /* الفهرس مش متاح — نكمّل بالتتبّع الحيّ */ }
-      // نفس مسار تليجرام: لو البوابة طوّلت عن الميزانية بتكمّل عن طريق /finish
-      // (deliverTo) وrenderResult بيحفظ نص التتبّع في المهمة — والبالون بيقراه.
+      // (المدير 2026-09-07) نفس ترتيب تليجرام: الملفات فورًا + مهمة SMAX فورًا،
+      // والتتبّع الحيّ (توكن + بوابة) في الخلفية بالتوازي — الرد بيرجع في
+      // أقل من ثانية. لو الشحنة مش في ملفاتنا: مهمة SKIPPED (مافيش بحث في
+      // SMAX) بس بتفضل موجودة عشان البالون يقرا نص التتبّع منها.
       const msgId = `b${sentAt}${Math.random().toString(36).slice(2, 7)}`;
       const deliverTo = { chat_id: 'bubble', message_id: msgId };
-      let journey = null;
-      try {
-        const token = await Promise.race([
-          getToken(env, ctx),
-          new Promise((r) => setTimeout(() => r(null), GETTOKEN_MAX_WAIT_MS)),
-        ]);
-        journey = await fetchJourney(bc, token, env, TRACK_BUDGET_MS, deliverTo);
-        if (journey.err === 'expired') {
-          const fresh = await renewNow(env, () => {});
-          journey = fresh ? await fetchJourney(bc, fresh, env, TRACK_BUDGET_MS, deliverTo)
-                          : { err: 'refresh-failed' };
-          if (journey.err === 'expired') journey = { err: 'refresh-failed' };
-        }
-      } catch (e) { journey = { err: String(e).slice(0, 60) }; }
-      const pending = journey?.err === 'timeout';
-      const trackingText = pending
-        ? `🔍 <b>${bc}</b>\n━━━━━━━━━━━━━━━━━━━━\n⏳ التتبّع الحيّ لسه بيتجمّع من البوابة...`
-        : buildReply(bc, row, journey);
+      const filesText = buildReply(bc, row, { err: 'pending' });
       let jobId = null;
       try {
         jobId = await createSmaxJob(env, {
           corr_id: newCorrId(), chat_id: 'bubble', message_id: msgId, barcode: bc,
-          national_id: row?.nid || '', tracking_text: pending ? '' : trackingText,
-          sent_at: sentAt, track: trackSummary(row, pending ? null : journey),
+          national_id: row?.nid || '', tracking_text: '', sent_at: sentAt,
+          track: trackSummary(row, null), status: smaxWorthIt(row) ? 'PENDING' : 'SKIPPED',
         });
       } catch (e) { jobId = null; }
-      const tail = jobId ? '\n━━━━━━━━━━━━━━━━━━━━\n🔎 جاري البحث عن الشكوى في SMAX...'
-                         : '\n━━━━━━━━━━━━━━━━━━━━\n📋 <b>الشكوى</b>: الطابور مش متاح دلوقتي.';
-      return Response.json({ ok: true, job_id: jobId, text: trackingText + tail });
+      ctx.waitUntil((async () => {
+        let journey = null;
+        try {
+          const token = await Promise.race([
+            getToken(env, ctx),
+            new Promise((r) => setTimeout(() => r(null), GETTOKEN_MAX_WAIT_MS)),
+          ]);
+          journey = await fetchJourney(bc, token, env, TRACK_BUDGET_MS, deliverTo);
+          if (journey.err === 'expired') {
+            const fresh = await renewNow(env, () => {});
+            journey = fresh ? await fetchJourney(bc, fresh, env, TRACK_BUDGET_MS, deliverTo)
+                            : { err: 'refresh-failed' };
+            if (journey.err === 'expired') journey = { err: 'refresh-failed' };
+          }
+        } catch (e) { journey = { err: String(e).slice(0, 60) }; }
+        if (journey?.err === 'timeout') return;          // /finish → renderResult
+        await renderResult(env, 'bubble', msgId, bc, journey);
+      })().catch(() => {}));
+      const tail = !jobId ? '\n━━━━━━━━━━━━━━━━━━━━\n📋 <b>الشكوى</b>: الطابور مش متاح دلوقتي.'
+                          : (smaxWorthIt(row) ? SEARCHING_TAIL : smaxSkipTail(row));
+      return Response.json({ ok: true, job_id: jobId, text: filesText + tail });
     }
     if (url.pathname === '/bubble' && request.method === 'GET') {
       const auth = request.headers.get('Authorization') || '';
@@ -1315,15 +1369,24 @@ export default {
       if (!rows.length) return new Response('not found', { status: 404 });
       const j = rows[0];
       const nowSec = Math.floor(Date.now() / 1000);
-      // نص التتبّع فاضي = البوابة لسه ماكمّلتش عن طريق /finish
-      const head = String(j.tracking_text || '')
-        || `🔍 <b>${esc(j.barcode || '')}</b>\n━━━━━━━━━━━━━━━━━━━━\n⏳ التتبّع الحيّ لسه بيتجمّع من البوابة...`;
+      // نص التتبّع فاضي = التتبّع الحيّ لسه بيتجمّع — بس الملفات بتتعرض فورًا
+      let head = String(j.tracking_text || '');
+      let row = null;
+      if (!head || j.status === 'SKIPPED') {
+        try {
+          const rows2 = await tursoQuery(env, 'SELECT * FROM bc WHERE code = ?', [String(j.barcode || '')]);
+          row = rows2[0] || null;
+        } catch (e) { row = null; }
+      }
+      if (!head) head = buildReply(String(j.barcode || ''), row, { err: 'pending' });
       let tail = '';
       if (j.status === 'SUCCESS' && j.result) {
         let res = null; try { res = JSON.parse(j.result); } catch {}
         tail = (res ? renderSmax(res) : '') + timingLine(j, Number(j.completed_at) || nowSec);
       } else if (j.status === 'FAILED' || j.status === 'TIMEOUT') {
         tail = SMAX_FAIL_TAIL;
+      } else if (j.status === 'SKIPPED') {
+        tail = smaxSkipTail(row);
       } else {
         tail = '\n━━━━━━━━━━━━━━━━━━━━\n🔎 جاري البحث عن الشكوى في SMAX...';
       }
