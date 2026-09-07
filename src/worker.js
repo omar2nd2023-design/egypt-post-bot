@@ -632,8 +632,33 @@ async function createSmaxJob(env, j) {
      // ⚠️ tursoQuery بيبعت الوسائط كنص — null بيتحوّل لكلمة "null". بنستخدم 0
      //    كـ«لسه» وrenderResult بيملاه لما التتبّع يوصل.
      j.sent_at || now, j.tracking_text ? now : 0, j.track || '']);
+  // ♻️ 2026-09-07 (المدير: «ليه اتأخرت؟» — نفس الشحنة اتبحثت 3 مرات في ساعة،
+  //    وكل مرة 3 دقايق لأن شكوتها مقفولة وبتتلقى في آخر درجة). لو نفس
+  //    الباركود لقينا له شكوى خلال آخر 30 دقيقة، بنستخدم النتيجة فورًا
+  //    وبنقول إنها محفوظة من إمتى. الوكيل مابياخدش المهمة (SUCCESS).
+  if (j.status !== 'SKIPPED') {
+    try {
+      const prev = await tursoQuery(env,
+        `SELECT result, completed_at FROM smax_jobs
+         WHERE barcode=? AND status='SUCCESS' AND result<>'' AND job_id<>?
+           AND CAST(completed_at AS INTEGER) > ?
+         ORDER BY completed_at DESC LIMIT 1`,
+        [j.barcode, jobId, now - SMAX_CACHE_SEC]);
+      if (prev.length) {
+        let res = null; try { res = JSON.parse(prev[0].result); } catch { res = null; }
+        if (res && res.found) {
+          res.cached_from = Number(prev[0].completed_at) || now;
+          await tursoQuery(env,
+            `UPDATE smax_jobs SET status='SUCCESS', claimed_at=?, completed_at=?, result=?
+             WHERE job_id=? AND status='PENDING'`,
+            [now, now, JSON.stringify(res).slice(0, 60000), jobId]);
+        }
+      }
+    } catch (e) { /* الكاش اختياري — من غيره المهمة بتتبحث عادي */ }
+  }
   return jobId;
 }
+const SMAX_CACHE_SEC = 30 * 60;
 
 /** ملخص التتبّع اللي محتاجه تحليل الشكوى على الوكيل (المرحلة 3):
  *  آخر حالة وقبل الأخيرة (بتاريخهم) · تاريخ استلام الشحنة من الجهة · تاريخ الطلب.
@@ -787,6 +812,10 @@ function renderSmax(res) {
     return L.join('\n');
   }
   L.push('📋 <b>بيانات الشكوى</b> 🟢 <b>لقينا الشكوى</b>');
+  if (res.cached_from) {
+    const ago = Math.max(1, Math.round((Date.now() / 1000 - Number(res.cached_from)) / 60));
+    L.push(`   ♻️ <i>نفس الشحنة اتبحثت من ${ago} دقيقة — دي نتيجتها المحفوظة (بحث جديد بعد 30 دقيقة)</i>`);
+  }
   // قرار المستخدم 2026-09-06: لو مالقيناش بـActive=Yes بنبحث بـActive=No
   // ونقول صراحة إنها مقفولة.
   if (res.closed) L.push('   ⚠️ <b>الشكوى مغلقة</b> — اتلقت بعد تغيير الفلتر Active إلى No');
