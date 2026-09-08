@@ -20,6 +20,7 @@
 الإيقاف: Ctrl+C  (أو إنهاء العملية).
 """
 import io
+import atexit
 import json
 import os
 import platform
@@ -45,6 +46,12 @@ SMAX_ENV = Path(os.environ.get("SMAX_ENV_FILE",
 ID_FILE = HERE / "agent_id.txt"
 ENV_FILE = HERE / "agent.env"
 LOG_FILE = HERE / "agent.log"
+# 🔴 2026-09-08: يوم 16:33:20 العملية اختفت من غير أي سطر في اللوج، والحارس
+#    رجّعها بعد 10 دقايق — فطلب تتبّع استنى 6 دقايق ومحدش عرف السبب.
+#    الملف ده بيتكتب عند البداية بـclean=False، وبيتقفل بـclean=True عند أي
+#    خروج بيعدّي على بايثون. لو لقيناه clean=False في التشغيلة الجاية،
+#    يبقى العملية **اتقتلت من برّه** (مش وقعت) — وده في حد ذاته إجابة.
+RUN_FILE = HERE / "agent_run.json"
 
 # النبض المتكيّف: أسرع بعد أي نشاط، وبيهدى في السكون.
 # المرحلة 1 مافيهاش نشاط، فالمعدّل هيفضل IDLE - بس الآلية جاهزة
@@ -79,6 +86,85 @@ def log(msg):
             f.write(line + "\n")
     except Exception:
         pass
+
+
+# ------------------------------------------------- سجل الجلسة والخروج
+# ⚠️ مافيش أي سر هنا: رقم العملية · الوقت · معرّف المهمة · سبب الخروج بس.
+
+_run = {"pid": os.getpid(), "started": "", "clean": False,
+        "phase": "بدء", "job": "", "exit": ""}
+_exit_logged = False
+
+
+def _save_run():
+    try:
+        RUN_FILE.write_text(json.dumps(_run, ensure_ascii=False, indent=1),
+                            encoding="utf-8")
+    except Exception:
+        pass
+
+
+def set_phase(phase, job=""):
+    """آخر حاجة كان الوكيل بيعملها — بتتكتب على القرص عشان تعيش بعد الموت.
+
+    ⚠️ الكتابة بتحصل **لما المرحلة تتغيّر بس** — الحلقة بتنده الدالة دي كل
+    5-10 ثواني، وكتابة ملف كل نبضة ملهاش لازمة.
+    """
+    if _run["phase"] == phase and (not job or _run.get("job") == job):
+        return
+    _run["phase"] = phase
+    if job:
+        _run["job"] = job
+    _save_run()
+
+
+def mark_exit(reason):
+    """بيتنده مرة واحدة عند أي خروج بيعدّي على بايثون."""
+    global _exit_logged
+    if _exit_logged:
+        return
+    _exit_logged = True
+    _run["clean"] = True
+    _run["exit"] = reason
+    _save_run()
+    log("الوكيل بيقفل — السبب: %s · آخر مرحلة: %s%s"
+        % (reason, _run.get("phase") or "?",
+           (" · آخر مهمة: %s" % _run["job"]) if _run.get("job") else ""))
+
+
+def _exit_logged_skip():
+    """النسخة الزيادة بتخرج من غير ما تكتب على سجل النسخة الشغّالة."""
+    global _exit_logged
+    _exit_logged = True
+
+
+def report_previous_run():
+    """التشغيلة اللي فاتت خرجت إزاي؟ ده اللي بيكشف القتل الصامت."""
+    try:
+        old = json.loads(RUN_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if old.get("clean"):
+        log("التشغيلة السابقة (pid %s) قفلت صح — السبب: %s"
+            % (old.get("pid", "?"), old.get("exit") or "?"))
+    else:
+        log("!! التشغيلة السابقة (pid %s) **ماكتبتش سطر خروج** — يعني العملية "
+            "اتقتلت من برّه أو الجهاز اتقفل، مش استثناء في الكود. "
+            "بدأت %s · آخر مرحلة: %s%s"
+            % (old.get("pid", "?"), old.get("started") or "?",
+               old.get("phase") or "?",
+               (" · آخر مهمة: %s" % old["job"]) if old.get("job") else ""))
+
+
+def _excepthook(kind, value, tb):
+    """أي استثناء مش ممسوك بيتكتب في اللوج قبل ما العملية تموت."""
+    import traceback
+    try:
+        txt = "".join(traceback.format_exception(kind, value, tb))
+        log("!! استثناء غير ممسوك:\n" + redact(txt).rstrip())
+    except Exception:
+        pass
+    mark_exit("استثناء غير ممسوك: %s" % kind.__name__)
 
 
 def load_env():
@@ -422,8 +508,10 @@ class Agent:
             self.mark_active()
             corr = job.get("corr_id", "?")
             log("%s مهمة اتاستلمت: %s" % (corr, job.get("job_id")))
+            set_phase("بينفّذ مهمة", str(job.get("job_id") or corr))
             t0 = time.time()
             ok, res = self.execute(job)
+            set_phase("بيسلّم النتيجة", str(job.get("job_id") or corr))
             log("%s خلصت في %.0f ث — %s" % (corr, time.time() - t0,
                 "لقيت" if ok and isinstance(res, dict) and res.get("found")
                 else ("مالقتش" if ok else "فشل")))
@@ -459,6 +547,7 @@ class Agent:
     def run(self):
         log("الوكيل بدأ - المعرّف %s" % self.aid)
         log("الـWorker: %s" % self.base)
+        set_phase("بيستنى مهمة")
         while not self.stop.is_set():
             try:
                 code, j = self.beat()
@@ -476,11 +565,18 @@ class Agent:
                 self.failed += 1
                 self.last_error = type(e).__name__
                 log("نبضة فشلت: %s: %s" % (type(e).__name__, redact(e)))
+            set_phase("بيستنى مهمة")
             self.stop.wait(self.interval())
         log("الوكيل وقف - نبضات ناجحة %d / فاشلة %d" % (self.sent, self.failed))
 
 
 def main():
+    # 🔴 تشخيص الخروج **قبل الحارس**: عايزين نقرا سجل التشغيلة السابقة حتى لو
+    #    النسخة دي هتخرج فورًا. الترتيب ده مقصود.
+    report_previous_run()
+    sys.excepthook = _excepthook
+    atexit.register(mark_exit, "خروج عادي")
+
     # 🔴 الحارس **قبل أي حاجة تانية** — قبل قراءة الأسرار وقبل أي نبضة.
     #    نسخة تانية بتخرج من غير ما تبعت ولا طلب واحد للـWorker.
     guard = SingleInstance()
@@ -489,6 +585,9 @@ def main():
                "(%s) — بيخرج من غير ما يبعت أي نبضة." % guard.scope)
         print(msg, flush=True)
         log(msg)
+        # ⚠️ النسخة الزيادة **ماتلمسش** سجل الجلسة — الملف بتاع النسخة
+        #    الشغّالة، ولو كتبنا فوقه هنضيّع سبب خروجها.
+        _exit_logged_skip()
         return 3
 
     load_env()
@@ -502,8 +601,9 @@ def main():
 
     a = Agent(worker, secret, agent_id())
 
-    def _sig(*_):
+    def _sig(signum=None, *_):
         log("إشارة إيقاف - بيقفل")
+        _run["exit"] = "إشارة إيقاف (%s)" % (signum if signum else "?")
         a.stop.set()
     try:
         signal.signal(signal.SIGINT, _sig)
@@ -512,8 +612,19 @@ def main():
         pass
 
     log("حارس النسخة الواحدة: %s" % guard.scope)
+    _run["started"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    _run["clean"] = False
+    _run["exit"] = ""
+    _save_run()
     try:
         a.run()
+    except BaseException as e:
+        # KeyboardInterrupt وSystemExit داخلين هنا عن قصد — الخروج بأي سبب
+        # لازم يتسجّل، مش الأخطاء بس.
+        mark_exit(("%s: %s" % (type(e).__name__, redact(e)))[:200])
+        raise
+    else:
+        mark_exit(_run.get("exit") or "الحلقة وقفت طبيعي")
     finally:
         a._close_browser()
         guard.release()
