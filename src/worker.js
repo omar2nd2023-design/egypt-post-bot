@@ -315,7 +315,7 @@ async function fetchJourney(barcode, token, env, budgetMs = 25000,
  * بيعيد استعلام Turso بدل ما الصف يتنقل في جسم HTTP — الصف فيه
  * بيانات شخصية، والاستعلام رخيص.
  */
-async function renderResult(env, chatId, msgId, bc, journey) {
+async function renderResult(env, chatId, msgId, bc, journey, sentAt = 0) {
   let row = null;
   try {
     const rows = await tursoQuery(env, 'SELECT * FROM bc WHERE code = ?', [bc]);
@@ -328,6 +328,11 @@ async function renderResult(env, chatId, msgId, bc, journey) {
   // الوكيل تتكتب في **نفس الرسالة**، ولو النتيجة سبقتنا بنلحقها دلوقتي.
   // ⚠️ أي فشل هنا = السلوك القديم بالحرف (تعديل الرسالة بنص التتبّع).
   let smaxTail = '';
+  // ⚠️ المدير 2026-09-09: القرار الأول («نبحث ولا لأ») بيتاخد **قبل** ما
+  //    الرحلة الحيّة توصل — وقتها مافيش تاريخ غير ملفاتنا. هنا الرحلة بقت في
+  //    إيدنا، فبنعيد الحكم بيها: لو طلعت قديمة كفاية بنعمل المهمة (أو نحوّلها
+  //    من SKIPPED لـPENDING) والوكيل ياخدها.
+  const worth = smaxWorthIt(row, journey);
   try {
     const jid = `${chatId}:${msgId}`;
     const jobs = await tursoQuery(env,
@@ -349,14 +354,34 @@ async function renderResult(env, chatId, msgId, bc, journey) {
       } else if (j.status === 'FAILED' || j.status === 'TIMEOUT') {
         smaxTail = SMAX_FAIL_TAIL + timingLine(j, nowSec);
       } else if (j.status === 'SKIPPED') {
-        smaxTail = smaxSkipTail(row);
+        if (worth) {                       // الرحلة قالت إنه قديم كفاية
+          await tursoQuery(env,
+            `UPDATE smax_jobs SET status='PENDING', expires_at=?
+             WHERE job_id=? AND status='SKIPPED'`,
+            [nowSec + JOB_EXPIRY_SEC, jid]);
+          smaxTail = await searchingTail(env);
+        } else {
+          smaxTail = smaxSkipTail(row, journey) + trackTimeLine(sentAt);
+        }
       } else {
         smaxTail = await searchingTail(env);
       }
+    } else if (worth && env.AGENT_SECRET) {
+      // مافيش مهمة أصلًا (الشحنة مش في ملفاتنا فمااتعملتش بدري) — بنعملها
+      // دلوقتي بعد ما الرحلة أثبتت إن الرقم صح وعمره فوق الحد.
+      await createSmaxJob(env, {
+        corr_id: newCorrId(), chat_id: chatId, message_id: msgId, barcode: bc,
+        national_id: row?.nid || '', tracking_text: text,
+        sent_at: sentAt || Math.floor(Date.now() / 1000),
+        track: trackSummary(row, journey),
+      });
+      smaxTail = await searchingTail(env);
     }
   } catch (e) { smaxTail = ''; }
-  // المدير 2026-09-07: مش في ملفاتنا / طلب جديد = مافيش بحث في الشكاوى أصلًا
-  if (!smaxTail && !smaxWorthIt(row)) smaxTail = smaxSkipTail(row);
+  // طلب جديد (أو لا ملفات ولا رحلة) = مافيش بحث في الشكاوى أصلًا
+  if (!smaxTail && !worth) {
+    smaxTail = smaxSkipTail(row, journey) + trackTimeLine(sentAt);
+  }
 
   // مهام البالون: مافيش رسالة تليجرام — النص اتحفظ في المهمة والبالون بيقراه من GET /bubble
   if (String(chatId) === 'bubble') return;
@@ -393,36 +418,67 @@ async function searchingTail(env) {
   } catch (e) { note = ''; }
   return SEARCHING_TAIL + note;
 }
-// المدير 2026-09-07: لو الشحنة مش في ملفاتنا مافيش بحث في SMAX — يا الرقم غلط
-// يا الشحنة لسه ماوصلتناش، وفي الحالتين مش هتلاقي شكوى، فمانضيّعش وقت.
-const NO_INDEX_TAIL =
-  '\n━━━━━━━━━━━━━━━━━━━━\n🟪 📋 <b>الشكوى</b>\n🟠 <b>الشحنة مش في ملفاتنا — مافيش بحث في SMAX</b> '
-  + '(يا الرقم غلط يا لسه ماوصلتناش).';
-// المدير 2026-09-07: طلب عمره أقل من 5 أيام مش هيبقى له شكوى (نظام الشكاوى
+// المدير 2026-09-07: طلب عمره 5 أيام أو أقل مش هيبقى له شكوى (نظام الشكاوى
 // مابيقبلش قبل كده) — مانضيّعش وقت في SMAX ونقول السبب.
+//
+// ⚠️ المدير 2026-09-09 — تعديل D-06: **الرحلة الحيّة بقت المرجع الأول لعمر
+//    الطلب.** قبل كده الشرطين كانوا مربوطين بـ«و»: لازم تكون في ملفاتنا **و**
+//    عمرها فوق 5 أيام — فسقوط الشرط الأول كان بينهي الموضوع وشرط العمر
+//    مايتحسبش أصلًا. النتيجة: شحنة اتسجّلت **النهاردة** والرحلة الحيّة
+//    بتوريها بـ5 حالات ردّت «مش في ملفاتنا» بدل «لسه بدري، تعالى بعد كذا».
+//    طالما البريد رجّع رحلة يبقى **الرقم صح**، وملفاتنا هي اللي مالحقتش —
+//    فالمعيار بقى العمر، مش «هو عندنا ولا لأ».
+const NO_INDEX_TAIL =
+  '\n━━━━━━━━━━━━━━━━━━━━\n🟪 📋 <b>الشكوى</b>\n🟠 <b>الشحنة مش في ملفاتنا ومالهاش رحلة عند البريد — مافيش بحث في SMAX</b> '
+  + '(الرقم غلط غالبًا).';
 const RECENT_DAYS = 5;
-function tooRecent(row) {
-  const r = String(row?.r || '').slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(r)) return false;
-  const t = Date.parse(r + 'T00:00:00Z');
-  if (!Number.isFinite(t)) return false;
-  // المدير: «5 أيام فأقل» — يعني عمر الطلب بالأيام ≤ 5 (البحث من اليوم السادس).
-  // 2026-09-07: طلب 09-02 (5 أيام بالظبط) اتبحث بالغلط لأن الشرط كان «أقل من 5».
-  const days = Math.floor((Date.now() - t) / 86400e3);
-  return days <= RECENT_DAYS;
+/** تاريخ «تم تسجيل الطلب» — من الرحلة الحيّة (records) أو من أحداث عمود track.
+ *  لو الاسم اتغيّر من عند البريد بناخد **أقدم** حدث (الرحلة راجعة الأحدث أول). */
+function startDate(src) {
+  const list = Array.isArray(src) ? src
+    : (src?.records || []).map((r) => ({ status: r.ItemStatus, time: r.EventDateAndTime }));
+  if (!list.length) return '';
+  const reg = list.find((e) => /تم تسجيل الطلب/.test(String(e.status || '')));
+  const pick = reg || list[list.length - 1];
+  const m = String(pick?.time || '').match(/\d{4}-\d{2}-\d{2}/);
+  return m ? m[0] : '';
 }
-function recentTail(row) {
-  return `\n━━━━━━━━━━━━━━━━━━━━\n🟪 📋 <b>الشكوى</b>\n🟠 <b>تاريخ الطلب ${esc(String(row?.r || '').slice(0, 10))} `
-    + `عمره ${RECENT_DAYS} أيام أو أقل</b> — مافيش شكوى متوقعة قبل كده، فمافيش بحث في SMAX دلوقتي. `
-    + `ابعتها تاني من اليوم السادس.`;
+/** عمر الطلب — {date, days}. الرحلة الأول وبعدين ملفاتنا. null = مافيش تاريخ. */
+function orderAge(row, src) {
+  const d = startDate(src) || String(row?.r || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
+  const t = Date.parse(d + 'T00:00:00Z');
+  if (!Number.isFinite(t)) return null;
+  // «5 أيام فأقل» — البحث من اليوم السادس. (2026-09-07: طلب عمره 5 أيام
+  // بالظبط اتبحث بالغلط لأن الشرط كان «أقل من 5».)
+  return { date: d, days: Math.floor((Date.now() - t) / 86400e3) };
 }
-/** ذيل الشكوى لما مافيش بحث: مش في ملفاتنا / طلب جديد */
-function smaxSkipTail(row) {
-  return row ? (tooRecent(row) ? recentTail(row) : NO_INDEX_TAIL) : NO_INDEX_TAIL;
+function recentTail(a) {
+  const left = Math.max(1, RECENT_DAYS + 1 - a.days);
+  return `\n━━━━━━━━━━━━━━━━━━━━\n🟪 📋 <b>الشكوى</b>\n🟠 <b>الطلب اتسجّل ${esc(a.date)} — عمره ${a.days} يوم</b> — `
+    + `مافيش شكوى متوقعة قبل ${RECENT_DAYS} أيام، فمافيش بحث في SMAX دلوقتي. `
+    + `ابعتها تاني بعد ${left} يوم.`;
 }
-/** هل نبحث في SMAX أصلًا؟ */
-function smaxWorthIt(row) {
-  return !!row && !tooRecent(row);
+/** ذيل الشكوى لما مافيش بحث: طلب جديد / لا ملفات ولا رحلة */
+function smaxSkipTail(row, src) {
+  const a = orderAge(row, src);
+  return (a && a.days <= RECENT_DAYS) ? recentTail(a) : NO_INDEX_TAIL;
+}
+/** هل نبحث في SMAX أصلًا؟ العمر هو الحكم — من الرحلة أو من ملفاتنا. */
+function smaxWorthIt(row, src) {
+  const a = orderAge(row, src);
+  if (a) return a.days > RECENT_DAYS;
+  // مافيش تاريخ يتقري: نفس السلوك القديم — في ملفاتنا يعني نبحث.
+  return !!row;
+}
+/** سطر مدة العملية لما مافيش مهمة SMAX (مافيش بحث) — قبل كده الوقت كان
+ *  مربوط بالبحث، فأي رد من غير بحث كان بيطلع من غير أي وقت. */
+function trackTimeLine(sentAt) {
+  const s = Number(sentAt) || 0;
+  if (!s) return '';
+  const d = Math.floor(Date.now() / 1000) - s;
+  return d > 0 ? `\n\n✅ <b>تمت العملية في مدة: ${fmtSec(d)}</b>`
+    + '\n   📦 التتبّع من الملفات والتتبّع الحي (مافيش بحث في الشكاوى)' : '';
 }
 
 /** يكتب التتبّع + الشكوى في **نفس الرسالة**؛ لو النص عدّى حد تليجرام
@@ -1065,7 +1121,9 @@ async function handleUpdate(env, update, ctx) {
   //    مهمة SMAX أصلًا (مش هتلاقي شكوى — الرقم غلط أو لسه ماوصلتناش).
   const filesText = buildReply(bc, row, { err: 'pending' });
   let jobMade = false;
-  if (msgId && env.AGENT_SECRET && smaxWorthIt(row)) {
+  // القرار دلوقتي بملفاتنا بس (الرحلة لسه ماوصلتش) — renderResult بيعيد
+  // الحكم بالرحلة وبيعمل المهمة لو طلع إنها تستاهل (المدير 2026-09-09).
+  if (msgId && env.AGENT_SECRET && smaxWorthIt(row, null)) {
     try {
       await createSmaxJob(env, {
         corr_id: newCorrId(), chat_id: chatId, message_id: msgId, barcode: bc,
@@ -1139,7 +1197,7 @@ async function handleUpdate(env, update, ctx) {
   //    وبتكتب في **نفس الرسالة** الملفات + التتبّع + حالة الشكوى الحالية
   //    (جاري البحث / النتيجة لو الوكيل سبقنا / مافيش بحث لو مش في ملفاتنا).
   if (msgId) {
-    try { await renderResult(env, chatId, msgId, bc, journey); }
+    try { await renderResult(env, chatId, msgId, bc, journey, sentAt); }
     catch (e) { await edit(buildReply(bc, row, journey)); }
   } else {
     await edit(buildReply(bc, row, journey));
@@ -1392,7 +1450,7 @@ export default {
         jobId = await createSmaxJob(env, {
           corr_id: newCorrId(), chat_id: 'bubble', message_id: msgId, barcode: bc,
           national_id: row?.nid || '', tracking_text: '', sent_at: sentAt,
-          track: trackSummary(row, null), status: smaxWorthIt(row) ? 'PENDING' : 'SKIPPED',
+          track: trackSummary(row, null), status: smaxWorthIt(row, null) ? 'PENDING' : 'SKIPPED',
         });
       } catch (e) { jobId = null; }
       ctx.waitUntil((async () => {
@@ -1411,11 +1469,11 @@ export default {
           }
         } catch (e) { journey = { err: String(e).slice(0, 60) }; }
         if (journey?.err === 'timeout') return;          // /finish → renderResult
-        await renderResult(env, 'bubble', msgId, bc, journey);
+        await renderResult(env, 'bubble', msgId, bc, journey, sentAt);
       })().catch(() => {}));
       // مافيش بحث؟ سطر السبب بيظهر بعد التتبّع الحيّ (GET /bubble) — الملفات ← التتبّع ← الشكوى
       const tail = !jobId ? '\n━━━━━━━━━━━━━━━━━━━━\n🟪 📋 <b>الشكوى</b>: الطابور مش متاح دلوقتي.'
-                          : (smaxWorthIt(row) ? SEARCHING_TAIL : '');
+                          : (smaxWorthIt(row, null) ? SEARCHING_TAIL : '');
       return Response.json({ ok: true, job_id: jobId, text: filesText + tail });
     }
     if (url.pathname === '/bubble' && request.method === 'GET') {
@@ -1429,7 +1487,7 @@ export default {
       try {
         rows = await tursoQuery(env,
           `SELECT status, tracking_text, result, sent_at, created_at, claimed_at,
-                  completed_at, tracked_at, barcode FROM smax_jobs WHERE job_id=?`, [jid]);
+                  completed_at, tracked_at, barcode, track FROM smax_jobs WHERE job_id=?`, [jid]);
       } catch (e) { return Response.json({ ok: false, error: 'store_failed' }, { status: 503 }); }
       if (!rows.length) return new Response('not found', { status: 404 });
       const j = rows[0];
@@ -1451,7 +1509,13 @@ export default {
       } else if (j.status === 'FAILED' || j.status === 'TIMEOUT') {
         tail = SMAX_FAIL_TAIL;
       } else if (j.status === 'SKIPPED') {
-        tail = j.tracking_text ? smaxSkipTail(row) : '';   // بعد التتبّع الحيّ بس
+        // أحداث الرحلة محفوظة في عمود track — منها بيتحسب عمر الطلب زي
+        // ما بيتحسب في تليجرام بالظبط (المدير 2026-09-09).
+        let ev = null;
+        try { ev = JSON.parse(j.track || '{}').events || null; } catch { ev = null; }
+        tail = j.tracking_text
+          ? smaxSkipTail(row, ev) + trackTimeLine(j.sent_at)
+          : '';                                            // بعد التتبّع الحيّ بس
       } else {
         tail = await searchingTail(env);
       }
